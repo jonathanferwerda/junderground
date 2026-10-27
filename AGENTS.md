@@ -32,6 +32,16 @@ cowlib's current release carries an open advisory).
 - The switch's private key is `data/server.key` (0600). Never log it, never put
   it in a record.
 - Any test that touches DETS is `async: false`; the table names are global.
+- **Admission is not part of the record chain.** `Directory` appends records;
+  `Admission` decides whether a house may use this switch. Do not fold a status
+  into a signed record — it would put the administrator inside the house's key.
+- **Constructs are a compatibility contract.** The eleven kinds and defaults in
+  `Constructs` must match `gb.pl`'s `%social_constructs`, and the channel string
+  must stay byte-identical to `mail_channel_key` (sorted kinds, `0x1f` join).
+- **A crest key is the record key.** `Record` rejects a crest whose `pubkey` is
+  not the record's key; never relax that to make an import easier.
+- **Administrator keys live in configuration** (`JG_ADMIN_KEYS`), never in a
+  record, a log line, or the repository.
 
 ## Boundary
 

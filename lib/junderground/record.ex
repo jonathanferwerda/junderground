@@ -116,6 +116,9 @@ defmodule Junderground.Record do
       not valid_name?(record["name"]) ->
         {:error, :bad_name}
 
+      not valid_crest?(record["crest"], record["pubkey"]) ->
+        {:error, :bad_crest}
+
       true ->
         :ok
     end
@@ -190,4 +193,18 @@ defmodule Junderground.Record do
 
   defp valid_name?(nil), do: true
   defp valid_name?(name), do: is_binary(name) and byte_size(name) <= 200
+
+  # The crest is the identity that signs the record: its key must be the record
+  # key, so "their crest verifies them" is literal. The fingerprint, when the
+  # client sends one, must be the one this key actually has.
+  defp valid_crest?(nil, _pubkey), do: true
+
+  defp valid_crest?(crest, pubkey) when is_map(crest) do
+    crest["pubkey"] == pubkey and
+      (is_nil(crest["uuid"]) or (is_binary(crest["uuid"]) and byte_size(crest["uuid"]) <= 64)) and
+      (is_nil(crest["name"]) or (is_binary(crest["name"]) and byte_size(crest["name"]) <= 200)) and
+      (is_nil(crest["fingerprint"]) or crest["fingerprint"] == Keys.fingerprint(pubkey))
+  end
+
+  defp valid_crest?(_crest, _pubkey), do: false
 end

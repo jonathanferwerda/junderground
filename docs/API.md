@@ -3,7 +3,8 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*.
+today unless it is marked *planned*. **v0.1.1 adds admission (administrator
+approval and probation), crest-bound identity, and construct dials.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -24,6 +25,12 @@ admin UI is optional and is not part of this contract.
    from the phone network never reaches this service.
 6. **The media plane is separate.** This process is the control plane; it never
    carries audio.
+7. **Registry is not admission.** A record says who a house is. An administrator
+   says it may use this switch; the two are deliberately separate.
+8. **The crest is the key.** A house's crest key signs its records and its
+   requests, so identity is not asserted, it is proved.
+9. **A dial is a construct tuple.** A room is tuned by the same eleven social
+   constructs the Mail app uses, so the two sides agree on what a room is named.
 
 ## 2. Encoding
 
@@ -78,6 +85,11 @@ groups of four (`C6/P ZA4L W5IV …` in the Perl fixture).
     "wss": "wss://alpha.example/v1/signal",
     "tailnet": "alpha-house.ts.net"
   },
+  "crest": {
+    "uuid": "house-uuid",
+    "name": "Alpha House",
+    "pubkey": "C6/pZA4LW5IVvv8581VwHcTcjnnrOdPhcs/E9NKrYOM="
+  },
   "sig": "w23ZvmFPjt1zNnPm5GmhHt70vjhAQGsMfQXkNyaYCHg52zcD4L2qBPiZHI2VjUdHL/5uMG7X+R6a5pPrPtCqCQ=="
 }
 ```
@@ -98,6 +110,7 @@ groups of four (`C6/P ZA4L W5IV …` in the Perl fixture).
 | `issued` | yes | unix seconds, at most one hour in the future |
 | `visibility` | no | `public` (default), `unlisted`, `sealed` |
 | `routes` | no | ≤ 16 string→string pairs, value ≤ 2 KB |
+| `crest` | no | `{uuid, name, pubkey, fingerprint}`; `pubkey` must be the record key |
 | `sig` | yes | Ed25519 over the rest |
 
 `routes` keys are open; the intended ones are `wss` (signaling), `turn`
@@ -123,6 +136,98 @@ the same key may re-register with a higher `seq`.
 - `unlisted` / `sealed` — lookup and history require this house's signed request;
   otherwise `404`. The global feed (`/v1/directory`) never includes them.
   `sealed` is currently the same as `unlisted`; field-level sealing is *planned*.
+
+### Crest
+
+The crest is the house's identity. The record's signing key **is** the crest
+key, so a request signed by the house is literally its crest verifying it. A
+record may carry the crest so a client can show it and bind it to the crest
+jawnos already knows:
+
+```json
+"crest": {
+  "uuid": "house-uuid",
+  "name": "Alpha House",
+  "pubkey": "<the same key as the record's pubkey>",
+  "fingerprint": "ABCD EFGH ..."
+}
+```
+
+The switch rejects a crest whose `pubkey` is not the record's key, or whose
+`fingerprint` is not the one that key actually has. A rotation carries the crest
+forward; a different key without a rotation is a different crest and needs a new
+approval.
+
+### Admission
+
+Registering does not admit a house. The first record opens a `pending` entry,
+and an administrator — a person or an agent holding an admin key — moves it:
+
+```
+pending ──▶ approved ──▶ probation ──▶ approved
+    │            │            │
+    ├──▶ rejected│            ├──▶ suspended ──▶ approved
+    └──▶ banned  └────────────┴──▶ banned
+```
+
+- `approved` — normal use.
+- `probation` — grants are at most **5 minutes**, caps drop to
+  `join`/`subscribe`/`publish_audio`, and the house cannot open a new room.
+  Existing rooms keep working.
+- `suspended`, `rejected`, `banned` — may not append records, create rooms or
+  receive grants.
+- `pending` — may append its own records (fixing a route while waiting), but is
+  not listed and receives no grants.
+
+Only `approved` and `probation` appear in lookups and on the dial. A
+registration whose crest key is in `JG_ADMIN_KEYS` is approved on sight.
+`JG_AUTO_APPROVE=1` approves everything (development only). A mirrored record is
+**not** admitted by the mirroring switch: each administrator admits for their
+own switch.
+
+
+## 4b. Constructs and the dial
+
+A room is tuned by a **dial**, exactly as in the Mail app: one value per social
+construct. The eleven kinds and their defaults are copied from `gb.pl`'s
+`%social_constructs`:
+
+| Kind | Default | Kind | Default |
+| --- | --- | --- | --- |
+| communities | local | governments | civic |
+| clubs | peers | corporations | sole |
+| teams | family | places | home |
+| people | self | vendors | market |
+| projects | life | events | now |
+| institutions | house | | |
+
+A dial that omits a kind takes its default. The channel is:
+
+```
+channel    = values in sorted kind order, joined by the byte 0x1f
+channel_id = SHA-256 hex of that string
+```
+
+That is byte-identical to `mail_channel_key()` in jawnos, so the same tuple
+names the same room on both sides. A room's head carries its `constructs`,
+`channel` and `advertised` flag; the signed record carries `constructs` and
+`advertised`.
+
+`GET /v1/constructs` returns the kinds and defaults for the dial UI.
+
+`GET /v1/dial?communities=harbour&clubs=chess` returns every advertised room of
+an admitted house on that channel:
+
+```json
+{
+  "channel": "…64 hex…",
+  "constructs": {"communities": "harbour", "clubs": "chess", "…": "…"},
+  "rooms": [room_meta, …]
+}
+```
+
+A room that is not `advertised` is reachable by its owner and by handle, but
+does not appear on the dial.
 
 ## 5. Signed requests
 
@@ -151,7 +256,9 @@ Rules:
 - nonce at least 16 characters, remembered for the window; reuse is `409 replay`;
 - `GET` bodies are empty, so the hash is the SHA-256 of the empty string;
 - registration (`POST /v1/houses`) needs no request signature — the record is
-  itself signed, and this is where a house first announces its key.
+  itself signed, and this is where a house first announces its key;
+- administrator requests use the same message and headers, but send
+  `X-JG-Admin: <public key>` instead of `X-JG-Handle`.
 
 ## 6. Endpoints
 
@@ -168,7 +275,9 @@ All responses are JSON. Errors are `{"error":{"code":"…"}}`.
   "issued": 1760000000,
   "houses": 12,
   "max_skew": 300,
-  "features": ["signed-records", "room-grants", "turn-credentials"],
+  "features": ["signed-records", "room-grants", "turn-credentials", "admission", "crest", "constructs"],
+  "admission": {"requires_approval": true, "statuses": ["pending", "approved", "probation", "suspended", "rejected", "banned"], "admins": 1},
+  "constructs": {"communities": "local", "clubs": "peers", "…": "…"},
   "turn": {"urls": ["turn:turn.thejunderground.example:3478"], "ttl": 600}
 }
 ```
@@ -191,7 +300,15 @@ matches the path and whose signer is the requester.
 
 ### `GET /v1/houses/:handle`
 
-The latest record. `410` when tombstoned, `404` when unknown or private to you.
+The latest record, unmodified (so it still verifies), with its admission state
+beside it:
+
+```json
+{"record": { …signed record… }, "fingerprint": "C6/P ZA4L …", "admission": {"status": "approved", "since": 1760000000, "review_at": 0}}
+```
+
+`admission.reason` is included only for the house itself. `410` when tombstoned,
+`404` when unknown, pending, or private to you.
 
 ### `GET /v1/houses/:handle/records?since=1`
 
@@ -200,7 +317,8 @@ The latest record. `410` when tombstoned, `404` when unknown or private to you.
 ### `GET /v1/directory?since=0&limit=100`
 
 A public feed for mirrors and caches: records in acceptance order, `limit`
-capped at 500. Non-public records are filtered out.
+capped at 500. Only admitted houses with `public` visibility are included;
+mirror with `POST /v1/mirror` instead when you need every record.
 
 ### `POST /v1/mirror`
 
@@ -286,6 +404,8 @@ A room is a policy record signed by the owning house's key:
   "pubkey": "C6/pZA4LW5IVvv8581VwHcTcjnnrOdPhcs/E9NKrYOM=",
   "seq": 1,
   "issued": 1760000000,
+  "constructs": {"communities": "harbour", "clubs": "chess", "…": "…"},
+  "advertised": "no",
   "policy": "invite",
   "max": 16,
   "recording": "off",
@@ -302,6 +422,8 @@ A room is a policy record signed by the owning house's key:
 | `max` | 2–256 | advisory; the SFU enforces the real limit |
 | `recording` | `off` / `allow` | `record` capability is only issued to the owner when `allow` |
 | `expires` | `0` or unix seconds | after this, grants are refused |
+| `constructs` | map | the dial; missing kinds take their defaults |
+| `advertised` | `yes` / `no` | `yes` puts the room on `GET /v1/dial` |
 
 Room records use the same `seq`/`prev`/key rules as house records, and the
 house must exist and not be tombstoned.
@@ -358,6 +480,71 @@ They are minted per request and never cached. coturn is the recommended server
 (`coturn` + `use-auth-secret` + `realm`), reached over UDP 3478 and TCP/TLS 5349,
 with TURN-over-TLS/443 as the fallback for restrictive networks.
 
+## 6b. Administrator endpoints
+
+For the administrator and the approval agent. Signed like a house request, but
+with the administrator's **crest key** in `X-JG-Admin` rather than a handle;
+only keys listed in `JG_ADMIN_KEYS` are accepted.
+
+```
+X-JG-Admin:     <base64 Ed25519 public key>
+X-JG-Timestamp: 1760000000
+X-JG-Nonce:     q2Z0m8r1oQd4xY7v
+X-JG-Signature: <base64>
+```
+
+### `GET /v1/admin/queue`
+
+```json
+{
+  "pending":   [{"handle": "alpha", "first_seen": 1760000000, "crest": "…"}, …],
+  "probation": [{"handle": "beta", "review_at": 1760600000, …}, …]
+}
+```
+
+### `GET /v1/admin/houses/:handle`
+
+The signed record, its admission entry and the record history — everything the
+agent needs to decide.
+
+### `POST /v1/admin/houses/:handle/status`
+
+```json
+{"status": "approved",
+ "reason": "crest vouched by two houses",
+ "review_at": 1760600000}
+```
+
+`status` is one of the six admission states. `review_at` is advisory: it puts
+the house in the probation list with a date, but nothing promotes
+automatically. Every decision is appended to the audit log.
+
+### `GET /v1/admin/audit?since=0`
+
+```json
+{"decisions": [{"at": 1760000000, "handle": "alpha", "status": "approved",
+                "by": "admin:C6/pZA4LW5I", "reason": "…", "review_at": 0}, …]}
+```
+
+### `GET /v1/admin/reports?since=0`
+
+```json
+{"reports": [{"id": 1, "at": 1760000000, "handle": "alpha",
+              "by": "beta", "reason": "spam", "detail": "…"}, …]}
+```
+
+### `POST /v1/reports` (house-signed)
+
+```json
+{"handle": "alpha",
+ "reason": "spam",
+ "detail": "what happened"}
+```
+
+`reason` is `spam`, `abuse`, `fraud`, `impersonation`, `illegal` or `other`. A
+house cannot report itself. The report is filed once, with its reporter, and is
+read by the administrator's agent.
+
 ## 10. Errors
 
 | Code | Status | Meaning |
@@ -376,6 +563,13 @@ with TURN-over-TLS/443 as the fallback for restrictive networks.
 | `broken_chain` | 409 | `prev` is not the current signature |
 | `wrong_key` | 409 | record signed by a key that is no longer active |
 | `revoked` | 409 | grant `jti` was revoked |
+| `not_admitted` | 403 | pending, suspended, rejected or banned house |
+| `room_closed` | 410 | the room's house is not admitted |
+| `not_admin` | 403 | an admin request from a key not in `JG_ADMIN_KEYS` |
+| `self_report` | 422 | a house reported itself |
+| `bad_status` / `bad_reason` / `bad_detail` | 422 | malformed admin or report body |
+| `bad_crest` | 422 | crest key or fingerprint is not the record's |
+| `bad_constructs` / `bad_advertised` | 422 | malformed dial on a room |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation

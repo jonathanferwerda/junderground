@@ -105,4 +105,20 @@ defmodule Junderground.RecordTest do
     assert Keys.verify_record(record)
     assert Record.validate(record, nil) == :ok
   end
+
+  test "a crest must be the key that signed the record", %{pub: pub, priv: priv} do
+    crest = %{"uuid" => "house-uuid", "name" => "Alpha", "pubkey" => pub}
+    assert Record.validate(signed("register", pub, priv, 1, %{"crest" => crest}), nil) == :ok
+
+    {other_pub, _other_priv} = Keys.generate()
+    wrong = Map.put(crest, "pubkey", other_pub)
+
+    assert Record.validate(signed("register", pub, priv, 1, %{"crest" => wrong}), nil) ==
+             {:error, :bad_crest}
+
+    wrong_fingerprint = Map.put(crest, "fingerprint", "0000 0000")
+
+    assert Record.validate(signed("register", pub, priv, 1, %{"crest" => wrong_fingerprint}), nil) ==
+             {:error, :bad_crest}
+  end
 end

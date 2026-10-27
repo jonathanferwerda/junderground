@@ -75,9 +75,19 @@ defmodule Junderground.Directory do
         {:reply, {:ok, :unchanged}, state}
 
       :ok ->
-        n = state.log_seq + 1
-        put(record, n)
-        {:reply, {:ok, %{handle: record["handle"], seq: record["seq"]}}, %{state | log_seq: n}}
+        # A first record opens an admission entry; later records are allowed
+        # while the house is pending, but not once it has been stopped.
+        if prior == nil do
+          Junderground.Admission.pending(record["handle"], record["pubkey"])
+        end
+
+        if Junderground.Admission.may_write?(record["handle"]) do
+          n = state.log_seq + 1
+          put(record, n)
+          {:reply, {:ok, %{handle: record["handle"], seq: record["seq"]}}, %{state | log_seq: n}}
+        else
+          {:reply, {:error, :not_admitted}, state}
+        end
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}

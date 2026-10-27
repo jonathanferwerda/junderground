@@ -11,7 +11,7 @@ defmodule Junderground.Rooms do
 
   use GenServer
 
-  alias Junderground.{Canonical, Directory, Keys, ServerKey, Token, Turn}
+  alias Junderground.{Admission, Canonical, Constructs, Directory, Keys, ServerKey, Token, Turn}
 
   @table :junderground_rooms
   @format "junderground-room"
@@ -41,6 +41,8 @@ defmodule Junderground.Rooms do
         "seq" => seq,
         "issued" => System.system_time(:second),
         "name" => room,
+        "constructs" => Constructs.defaults(),
+        "advertised" => "no",
         "policy" => "invite",
         "max" => 16,
         "recording" => "off",
@@ -53,6 +55,7 @@ defmodule Junderground.Rooms do
   def register(record), do: GenServer.call(__MODULE__, {:register, record})
   def latest(handle, room), do: GenServer.call(__MODULE__, {:latest, handle, room})
   def list(handle), do: GenServer.call(__MODULE__, {:list, handle})
+  def by_channel(channel), do: GenServer.call(__MODULE__, {:by_channel, channel})
 
   def grant(handle, room, requester, body) when is_map(body) do
     GenServer.call(__MODULE__, {:grant, handle, room, requester, body})
@@ -127,14 +130,36 @@ defmodule Junderground.Rooms do
     {:reply, {:ok, :dets.select(@table, ms)}, state}
   end
 
+  def handle_call({:by_channel, channel}, _from, state) do
+    heads = :dets.select(@table, [{{{:room, :_, :_}, :"$1"}, [], [:"$1"]}])
+
+    open =
+      Enum.filter(heads, fn head ->
+        head["channel"] == channel and not head["tombstoned"]
+      end)
+
+    {:reply, {:ok, open}, state}
+  end
+
   def handle_call({:grant, handle, room, requester, body}, _from, state) do
     reply =
-      with {:ok, head} <- fetch(handle, room),
+      with {:ok, requester_record} <- Admission.status(requester.handle),
+           :ok <- requester_admitted(requester_record),
+           {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
+           :ok <- owner_admitted(head["record"]["handle"]),
            :ok <- access(head["record"], requester, body["invite"]),
            {:ok, caps} <- clamp(head["record"], requester, body["caps"], body["invite"]) do
         now = System.system_time(:second)
+        probation = requester_record["status"] == "probation"
         ttl = Application.get_env(:junderground, :grant_ttl, 900)
+        ttl = if probation, do: min(ttl, 300), else: ttl
+
+        caps =
+          if probation,
+            do: Enum.filter(caps, &(&1 in ["join", "subscribe", "publish_audio"])),
+            else: caps
+
         room_exp = head["record"]["expires"] || 0
         expires = if room_exp > 0, do: min(now + ttl, room_exp), else: now + ttl
 
@@ -192,6 +217,7 @@ defmodule Junderground.Rooms do
   defp validate(record, prior) when is_map(record) do
     with :ok <- shape(record),
          :ok <- house_live(record["handle"]),
+         :ok <- allowed(record["handle"], prior),
          :ok <- signature(record) do
       chain(record, prior)
     end
@@ -246,6 +272,12 @@ defmodule Junderground.Rooms do
       not is_binary(record["name"]) or byte_size(record["name"]) > 200 ->
         {:error, :bad_name}
 
+      not valid_constructs?(record["constructs"]) ->
+        {:error, :bad_constructs}
+
+      record["advertised"] not in ["yes", "no"] ->
+        {:error, :bad_advertised}
+
       true ->
         :ok
     end
@@ -260,6 +292,28 @@ defmodule Junderground.Rooms do
 
   defp signature(record) do
     if Keys.verify_record(record), do: :ok, else: {:error, :bad_signature}
+  end
+
+  defp valid_constructs?(value), do: match?({:ok, _}, Constructs.normalize(value))
+
+  # A new room needs an approved house; editing an existing one is allowed
+  # while pending or on probation, but not after a stop.
+  defp allowed(handle, nil) do
+    if Admission.may_create_room?(handle), do: :ok, else: {:error, :not_admitted}
+  end
+
+  defp allowed(handle, _prior) do
+    if Admission.may_write?(handle), do: :ok, else: {:error, :not_admitted}
+  end
+
+  defp requester_admitted(%{"status" => status}) when status in ["approved", "probation"], do: :ok
+  defp requester_admitted(_record), do: {:error, :not_admitted}
+
+  defp owner_admitted(handle) do
+    case Admission.status(handle) do
+      {:ok, %{"status" => status}} when status in ["approved", "probation"] -> :ok
+      _ -> {:error, :room_closed}
+    end
   end
 
   defp chain(%{"kind" => "register"} = record, nil) do
@@ -413,6 +467,7 @@ defmodule Junderground.Rooms do
 
   defp put(record) do
     sig = record["sig"]
+    {:ok, constructs} = Constructs.normalize(record["constructs"])
 
     head = %{
       "seq" => record["seq"],
@@ -420,6 +475,9 @@ defmodule Junderground.Rooms do
       "pubkey" => record["pubkey"],
       "tombstoned" => record["kind"] == "tombstone",
       "room_key" => Canonical.sha256_hex(sig),
+      "constructs" => constructs,
+      "channel" => Constructs.channel_id(constructs),
+      "advertised" => record["advertised"] == "yes",
       "record" => record
     }
 

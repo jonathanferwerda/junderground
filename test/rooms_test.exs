@@ -1,7 +1,7 @@
 defmodule Junderground.RoomsTest do
   use ExUnit.Case, async: false
 
-  alias Junderground.{Directory, Keys, Record, Rooms, ServerKey, Token, Turn}
+  alias Junderground.{Admission, Directory, Keys, Record, Rooms, ServerKey, Token, Turn}
 
   setup do
     dir = Path.join(System.tmp_dir!(), "jg-rooms-#{System.unique_integer([:positive])}")
@@ -9,6 +9,7 @@ defmodule Junderground.RoomsTest do
     Application.put_env(:junderground, :data_dir, dir)
     ServerKey.reset()
 
+    start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 
@@ -26,12 +27,21 @@ defmodule Junderground.RoomsTest do
       Record.build("register", "alpha", pub, 1, %{"name" => "Alpha"}) |> Keys.sign_record(priv)
 
     {:ok, _} = Directory.register(house)
+    {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
 
     %{pub: pub, priv: priv}
   end
 
   defp room(pub, priv, fields) do
     Rooms.build("alpha", "lobby", pub, 1, fields) |> Keys.sign_record(priv)
+  end
+
+  defp house(name) do
+    {pub, priv} = Keys.generate()
+    record = Record.build("register", name, pub, 1, %{}) |> Keys.sign_record(priv)
+    {:ok, _} = Directory.register(record)
+    {:ok, _} = Admission.decide(name, "approved", "test", "", 0)
+    {pub, priv}
   end
 
   test "the owner gets a grant with the owner capabilities", %{pub: pub, priv: priv} do
@@ -59,6 +69,8 @@ defmodule Junderground.RoomsTest do
     assert {:ok, _} =
              Rooms.register(room(pub, priv, %{"policy" => "open", "recording" => "allow"}))
 
+    house("beta")
+
     assert {:ok, grant} =
              Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join", "record"]})
 
@@ -72,6 +84,7 @@ defmodule Junderground.RoomsTest do
 
   test "an invite room needs an invite grant", %{pub: pub, priv: priv} do
     assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "invite"}))
+    house("beta")
 
     assert {:error, :invite_required} =
              Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
@@ -133,5 +146,23 @@ defmodule Junderground.RoomsTest do
       |> Base.encode64()
 
     assert server["credential"] == expected
+  end
+
+  test "a room is found by the dial tuple the Mail app uses", %{pub: pub, priv: priv} do
+    dial = %{"communities" => "harbour", "clubs" => "chess", "projects" => "radio"}
+
+    assert {:ok, _} =
+             Rooms.register(
+               room(pub, priv, %{"policy" => "open", "advertised" => "yes", "constructs" => dial})
+             )
+
+    assert {:ok, heads} = Rooms.by_channel(Junderground.Constructs.channel_id(dial))
+    assert [head] = heads
+    assert head["constructs"]["communities"] == "harbour"
+    assert head["advertised"] == true
+
+    # a different dial names a different room
+    assert {:ok, []} =
+             Rooms.by_channel(Junderground.Constructs.channel_id(%{"communities" => "elsewhere"}))
   end
 end

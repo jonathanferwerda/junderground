@@ -1,12 +1,12 @@
 defmodule Junderground.Router do
   @moduledoc """
-  The headless HTTP surface. Every write is a signed record; every read is
-  either public or owner-only. See `docs/API.md` for the contract.
+  The headless HTTP surface. Every write is a signed record; reads are public,
+  owner-only, or administrator-only. See `docs/API.md` for the contract.
   """
 
   use Plug.Router
 
-  alias Junderground.{Auth, Directory, Rooms}
+  alias Junderground.{Admin, Admission, Auth, Constructs, Directory, Rooms}
 
   plug(Plug.RequestId)
   plug(Plug.Logger, log: :debug)
@@ -17,7 +17,7 @@ defmodule Junderground.Router do
   @default_limit 100
   @max_limit 500
 
-  # ---- meta ----------------------------------------------------------------
+  # ---- meta and the dial ------------------------------------------------
 
   get "/v1/meta" do
     json(conn, 200, %{
@@ -28,7 +28,20 @@ defmodule Junderground.Router do
       "issued" => System.system_time(:second),
       "houses" => Directory.count(),
       "max_skew" => Auth.max_skew(),
-      "features" => ["signed-records", "room-grants", "turn-credentials"],
+      "features" => [
+        "signed-records",
+        "room-grants",
+        "turn-credentials",
+        "admission",
+        "crest",
+        "constructs"
+      ],
+      "admission" => %{
+        "requires_approval" => not Application.get_env(:junderground, :auto_approve, false),
+        "statuses" => Admission.statuses(),
+        "admins" => Admin.count()
+      },
+      "constructs" => Constructs.defaults(),
       "turn" => %{
         "urls" => Application.get_env(:junderground, :turn_urls, []),
         "ttl" => 600
@@ -36,7 +49,27 @@ defmodule Junderground.Router do
     })
   end
 
-  # ---- house records -------------------------------------------------------
+  get "/v1/constructs" do
+    json(conn, 200, %{"kinds" => Constructs.kinds(), "defaults" => Constructs.defaults()})
+  end
+
+  get "/v1/dial" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    params = conn.query_params
+    {:ok, constructs} = Constructs.normalize(Map.take(params, Constructs.names()))
+    channel = params["channel"] || Constructs.channel_id(constructs)
+    {:ok, heads} = Rooms.by_channel(channel)
+
+    rooms =
+      heads
+      |> Enum.filter(& &1["advertised"])
+      |> Enum.filter(&Admission.admitted?(&1["record"]["handle"]))
+      |> Enum.map(&room_meta/1)
+
+    json(conn, 200, %{"channel" => channel, "constructs" => constructs, "rooms" => rooms})
+  end
+
+  # ---- house records ---------------------------------------------------
 
   post "/v1/houses" do
     case read_json(conn) do
@@ -46,7 +79,14 @@ defmodule Junderground.Router do
             json(conn, 200, %{"ok" => true, "unchanged" => true, "handle" => record["handle"]})
 
           {:ok, info} ->
-            json(conn, 201, %{"ok" => true, "handle" => info.handle, "seq" => info.seq})
+            admission = admission_view(record["handle"], true)
+
+            json(conn, 201, %{
+              "ok" => true,
+              "handle" => info.handle,
+              "seq" => info.seq,
+              "admission" => admission
+            })
 
           {:error, reason} ->
             fail(conn, reason)
@@ -75,6 +115,8 @@ defmodule Junderground.Router do
   end
 
   get "/v1/houses/:handle" do
+    viewer = viewer(conn)
+
     case Directory.latest(handle) do
       {:ok, %{"tombstoned" => true}} ->
         json(conn, 410, %{
@@ -82,25 +124,14 @@ defmodule Junderground.Router do
         })
 
       {:ok, head} ->
-        show(conn, handle, head)
+        if visible_record?(handle, head, viewer) do
+          owner? = match?(%{handle: ^handle}, viewer)
 
-      {:error, _} ->
-        fail(conn, :not_found)
-    end
-  end
-
-  get "/v1/houses/:handle/records" do
-    conn = Plug.Conn.fetch_query_params(conn)
-    since = int_param(conn.query_params["since"], 0)
-
-    case Directory.latest(handle) do
-      {:ok, %{"tombstoned" => true}} ->
-        fail(conn, :retired)
-
-      {:ok, head} ->
-        if visible_to?(conn, handle, head) do
-          {:ok, records} = Directory.history(handle, since)
-          json(conn, 200, %{"handle" => handle, "records" => records})
+          json(conn, 200, %{
+            "record" => head["record"],
+            "fingerprint" => head["fingerprint"],
+            "admission" => admission_view(handle, owner?)
+          })
         else
           fail(conn, :not_found)
         end
@@ -110,7 +141,35 @@ defmodule Junderground.Router do
     end
   end
 
-  # ---- directory feed and mirroring ---------------------------------------
+  get "/v1/houses/:handle/records" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    viewer = viewer(conn)
+    since = int_param(conn.query_params["since"], 0)
+
+    case Directory.latest(handle) do
+      {:ok, %{"tombstoned" => true}} ->
+        fail(conn, :retired)
+
+      {:ok, head} ->
+        if visible_record?(handle, head, viewer) do
+          {:ok, records} = Directory.history(handle, since)
+          owner? = match?(%{handle: ^handle}, viewer)
+
+          json(conn, 200, %{
+            "handle" => handle,
+            "records" => records,
+            "admission" => admission_view(handle, owner?)
+          })
+        else
+          fail(conn, :not_found)
+        end
+
+      {:error, _} ->
+        fail(conn, :not_found)
+    end
+  end
+
+  # ---- directory feed and mirroring -------------------------------------
 
   get "/v1/directory" do
     conn = Plug.Conn.fetch_query_params(conn)
@@ -120,7 +179,9 @@ defmodule Junderground.Router do
     {:ok, records} = Directory.feed(since, limit)
 
     records =
-      Enum.filter(records, fn record -> (record["visibility"] || "public") == "public" end)
+      Enum.filter(records, fn record ->
+        (record["visibility"] || "public") == "public" and Admission.admitted?(record["handle"])
+      end)
 
     json(conn, 200, %{"records" => records})
   end
@@ -132,7 +193,9 @@ defmodule Junderground.Router do
 
         json(conn, 200, %{
           "results" =>
-            Enum.map(results, fn {h, r} -> %{"handle" => h, "result" => to_string(r)} end)
+            Enum.map(results, fn {handle, result} ->
+              %{"handle" => handle, "result" => to_string(result)}
+            end)
         })
 
       {:ok, conn, _raw, _body} ->
@@ -143,13 +206,33 @@ defmodule Junderground.Router do
     end
   end
 
-  # ---- rooms ---------------------------------------------------------------
+  # ---- reports ----------------------------------------------------------
+
+  post "/v1/reports" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             :ok <- admitted_writer(requester.handle),
+             {:ok, record} <-
+               Admission.report(body["handle"], requester.handle, body["reason"], body["detail"]) do
+          json(conn, 202, %{"ok" => true, "id" => record["id"]})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  # ---- rooms ------------------------------------------------------------
 
   post "/v1/rooms" do
     case read_json(conn) do
       {:ok, conn, raw, record} ->
         with {:ok, requester} <- Auth.verify(conn, raw),
-             :ok <- same_handle(requester, record["handle"]) do
+             :ok <- same_handle(requester, record["handle"]),
+             :ok <- room_permission(requester.handle, record["room"]) do
           case Rooms.register(record) do
             {:ok, :unchanged} ->
               json(conn, 200, %{"ok" => true, "unchanged" => true})
@@ -177,15 +260,23 @@ defmodule Junderground.Router do
   get "/v1/rooms/:handle" do
     case Rooms.list(handle) do
       {:ok, heads} ->
-        rooms = Enum.map(heads, &room_meta/1)
-        json(conn, 200, %{"handle" => handle, "rooms" => rooms})
+        json(conn, 200, %{"handle" => handle, "rooms" => Enum.map(heads, &room_meta/1)})
     end
   end
 
   get "/v1/rooms/:handle/:room" do
+    viewer = viewer(conn)
+
     case Rooms.latest(handle, room) do
-      {:ok, head} -> json(conn, 200, room_meta(head))
-      {:error, _} -> fail(conn, :not_found)
+      {:ok, head} ->
+        if Admission.admitted?(handle) or match?(%{handle: ^handle}, viewer) do
+          json(conn, 200, room_meta(head))
+        else
+          fail(conn, :room_closed)
+        end
+
+      {:error, _} ->
+        fail(conn, :not_found)
     end
   end
 
@@ -219,27 +310,118 @@ defmodule Junderground.Router do
     end
   end
 
+  # ---- administrator (a person or an approval agent) --------------------
+
+  get "/v1/admin/queue" do
+    with {:ok, _admin} <- Admin.verify(conn, "") do
+      json(conn, 200, Admission.queue())
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/houses/:handle" do
+    with {:ok, _admin} <- Admin.verify(conn, ""),
+         {:ok, head} <- Directory.latest(handle) do
+      {:ok, records} = Directory.history(handle)
+      {:ok, admission} = Admission.status(handle)
+
+      json(conn, 200, %{
+        "record" => head["record"],
+        "fingerprint" => head["fingerprint"],
+        "admission" => admission,
+        "records" => records
+      })
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/admin/houses/:handle/status" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, admin} <- Admin.verify(conn, raw),
+             {:ok, record} <-
+               Admission.decide(
+                 handle,
+                 body["status"],
+                 "admin:" <> String.slice(admin.admin, 0, 12),
+                 body["reason"],
+                 body["review_at"]
+               ) do
+          json(conn, 200, %{"ok" => true, "admission" => record})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/audit" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    since = int_param(conn.query_params["since"], 0)
+
+    with {:ok, _admin} <- Admin.verify(conn, ""),
+         {:ok, records} <- Admission.audit(since) do
+      json(conn, 200, %{"decisions" => records})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/reports" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    since = int_param(conn.query_params["since"], 0)
+
+    with {:ok, _admin} <- Admin.verify(conn, ""),
+         {:ok, records} <- Admission.reports(since) do
+      json(conn, 200, %{"reports" => records})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
   match _ do
     fail(conn, :not_found)
   end
 
-  # ---- helpers -------------------------------------------------------------
+  # ---- helpers ----------------------------------------------------------
 
-  defp show(conn, handle, head) do
-    if visible_to?(conn, handle, head) do
-      json(conn, 200, head["record"])
-    else
-      fail(conn, :not_found)
+  defp viewer(conn) do
+    case Auth.verify(conn, "") do
+      {:ok, requester} -> requester
+      _ -> nil
     end
   end
 
-  defp visible_to?(conn, handle, head) do
-    case head["record"]["visibility"] || "public" do
-      "public" ->
+  defp visible_record?(handle, head, viewer) do
+    cond do
+      not Admission.admitted?(handle) ->
+        match?(%{handle: ^handle}, viewer)
+
+      (head["record"]["visibility"] || "public") == "public" ->
         true
 
-      _private ->
-        match?({:ok, %{handle: ^handle}}, Auth.verify(conn, ""))
+      true ->
+        match?(%{handle: ^handle}, viewer)
+    end
+  end
+
+  defp admission_view(handle, owner?) do
+    case Admission.status(handle) do
+      {:ok, record} ->
+        base = %{
+          "status" => record["status"],
+          "since" => record["since"],
+          "review_at" => record["review_at"]
+        }
+
+        if owner?, do: Map.put(base, "reason", record["reason"]), else: base
+
+      _ ->
+        %{"status" => "unregistered"}
     end
   end
 
@@ -250,12 +432,29 @@ defmodule Junderground.Router do
       "handle" => record["handle"],
       "room" => record["room"],
       "name" => record["name"],
+      "constructs" => head["constructs"],
+      "channel" => head["channel"],
+      "advertised" => head["advertised"],
       "policy" => record["policy"],
       "max" => record["max"],
       "recording" => record["recording"],
       "expires" => record["expires"],
       "room_key" => head["room_key"]
     }
+  end
+
+  defp room_permission(handle, room) do
+    case Rooms.latest(handle, room) do
+      {:ok, _head} ->
+        if Admission.may_write?(handle), do: :ok, else: {:error, :not_admitted}
+
+      _ ->
+        if Admission.may_create_room?(handle), do: :ok, else: {:error, :not_admitted}
+    end
+  end
+
+  defp admitted_writer(handle) do
+    if Admission.may_write?(handle), do: :ok, else: {:error, :not_admitted}
   end
 
   defp same_handle(%{handle: handle}, handle), do: :ok
@@ -308,9 +507,12 @@ defmodule Junderground.Router do
   defp status_for(:stale_timestamp), do: 401
   defp status_for(:bad_timestamp), do: 401
   defp status_for(:forbidden), do: 403
+  defp status_for(:not_admin), do: 403
+  defp status_for(:not_admitted), do: 403
   defp status_for(:invite_required), do: 403
   defp status_for(:retired), do: 410
   defp status_for(:expired), do: 410
+  defp status_for(:room_closed), do: 410
 
   defp status_for(reason)
        when reason in [

@@ -8,6 +8,7 @@ defmodule Junderground.Application do
       if Application.get_env(:junderground, :serve, true) do
         [
           Junderground.Nonces,
+          {Junderground.Admission, []},
           {Junderground.Directory, []},
           {Junderground.Rooms, []},
           {Bandit,

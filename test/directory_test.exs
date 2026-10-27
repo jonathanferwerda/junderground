@@ -6,6 +6,7 @@ defmodule Junderground.DirectoryTest do
   setup do
     dir = Path.join(System.tmp_dir!(), "jg-dir-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
+    start_supervised!({Junderground.Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
     on_exit(fn -> File.rm_rf(dir) end)
 

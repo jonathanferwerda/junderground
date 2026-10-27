@@ -1,7 +1,7 @@
 defmodule Junderground.HttpTest do
   use ExUnit.Case, async: false
 
-  alias Junderground.{Auth, Directory, Keys, Nonces, Record, Rooms, Router, ServerKey}
+  alias Junderground.{Admission, Auth, Directory, Keys, Nonces, Record, Rooms, Router, ServerKey}
 
   setup do
     dir = Path.join(System.tmp_dir!(), "jg-http-#{System.unique_integer([:positive])}")
@@ -10,6 +10,7 @@ defmodule Junderground.HttpTest do
     ServerKey.reset()
 
     start_supervised!(Nonces)
+    start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 
@@ -66,9 +67,15 @@ defmodule Junderground.HttpTest do
     conn = call(Plug.Test.conn(:post, "/v1/houses", body))
     assert conn.status == 201
 
+    # a fresh registration is pending and is not listed to anyone else
+    conn = call(Plug.Test.conn(:get, "/v1/houses/alpha"))
+    assert conn.status == 404
+
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
+
     conn = call(Plug.Test.conn(:get, "/v1/houses/alpha"))
     assert conn.status == 200
-    assert %{"handle" => "alpha", "name" => "Alpha"} = JSON.decode!(conn.resp_body)
+    assert %{"record" => %{"handle" => "alpha", "name" => "Alpha"}} = JSON.decode!(conn.resp_body)
   end
 
   test "a signed request buys a room grant", %{pub: pub, priv: priv} do
@@ -77,6 +84,7 @@ defmodule Junderground.HttpTest do
       |> Keys.sign_record(priv)
 
     assert {:ok, _} = Directory.register(house)
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
 
     room = Rooms.build("alpha", "lobby", pub, 1, %{"policy" => "open"}) |> Keys.sign_record(priv)
     assert {:ok, _} = Rooms.register(room)
@@ -111,7 +119,7 @@ defmodule Junderground.HttpTest do
       |> Keys.sign_record(priv)
 
     assert {:ok, _} = Directory.register(house)
-
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
     room = Rooms.build("alpha", "lobby", pub, 1, %{"policy" => "open"}) |> Keys.sign_record(priv)
     assert {:ok, _} = Rooms.register(room)
 
@@ -132,5 +140,34 @@ defmodule Junderground.HttpTest do
       |> call()
 
     assert second.status == 409
+  end
+
+  test "the dial finds an advertised room by construct", %{pub: pub, priv: priv} do
+    house =
+      Record.build("register", "alpha", pub, 1, %{"name" => "Alpha"})
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Directory.register(house)
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
+
+    dial = %{"communities" => "harbour", "clubs" => "chess"}
+
+    room =
+      Rooms.build("alpha", "lobby", pub, 1, %{
+        "policy" => "open",
+        "advertised" => "yes",
+        "constructs" => dial
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rooms.register(room)
+
+    conn = call(Plug.Test.conn(:get, "/v1/dial?communities=harbour&clubs=chess"))
+    assert conn.status == 200
+
+    assert %{"channel" => channel, "rooms" => [%{"handle" => "alpha", "room" => "lobby"}]} =
+             JSON.decode!(conn.resp_body)
+
+    assert channel == Junderground.Constructs.channel_id(dial)
   end
 end
