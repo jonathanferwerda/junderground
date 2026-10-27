@@ -117,7 +117,8 @@ The switch generates its Ed25519 identity on first boot at
 | Room rentals, guest windows, tickets clamped to a window | done |
 | Rental door: 5-minute notice, 1-minute close, eviction at start | done |
 | Canonical room names across languages (lexicon + room aliases) | done |
-| Room signaling relay (offer/answer/ICE/video over a grant WebSocket) | done |
+| Citizen broadcast: many announced streams over one connection | done |
+| Room signaling relay (offer/answer/ICE/video/broadcast on a grant socket) | done |
 | Citizen/resident/guest roles and free resident passes | done |
 | Switch rental fee quote and the renter's guest price | done |
 | Public feed for chaining jundergrounds | done |

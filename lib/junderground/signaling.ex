@@ -68,7 +68,8 @@ defmodule Junderground.Signaling.Protocol do
   """
 
   @max_bytes 32_768
-  @kinds ~w(offer answer ice bye video)
+  @kinds ~w(offer answer ice bye video broadcast)
+  @max_streams 12
 
   def max_bytes, do: @max_bytes
   def kinds, do: @kinds
@@ -112,6 +113,25 @@ defmodule Junderground.Signaling.Protocol do
           true -> finish(%{"type" => "video", "want" => msg["want"]}, msg, sender)
         end
 
+      # A broadcaster (the room's citizen) announces the streams it is sending,
+      # so a listener can name each track. Media still goes peer to peer.
+      kind == "broadcast" ->
+        case sanitize_streams(msg["streams"]) do
+          {:ok, streams} ->
+            finish(
+              %{
+                "type" => "broadcast",
+                "on" => if(msg["on"] == "no", do: "no", else: "yes"),
+                "streams" => streams
+              },
+              msg,
+              sender
+            )
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
       true ->
         cond do
           not is_binary(msg["sdp"]) or byte_size(msg["sdp"]) > 24_576 ->
@@ -126,6 +146,36 @@ defmodule Junderground.Signaling.Protocol do
         end
     end
   end
+
+  defp sanitize_streams(streams) when is_list(streams) and length(streams) <= @max_streams do
+    result =
+      Enum.reduce_while(streams, [], fn stream, acc ->
+        id = stream["id"]
+        label = stream["label"]
+        kind = stream["kind"]
+
+        cond do
+          not is_binary(id) or byte_size(id) == 0 or byte_size(id) > 64 ->
+            {:halt, {:error, "bad stream id"}}
+
+          not is_binary(label) or byte_size(label) > 80 ->
+            {:halt, {:error, "bad stream label"}}
+
+          kind not in ["audio", "video"] ->
+            {:halt, {:error, "bad stream kind"}}
+
+          true ->
+            {:cont, [%{"id" => id, "label" => label, "kind" => kind} | acc]}
+        end
+      end)
+
+    case result do
+      {:error, reason} -> {:error, reason}
+      list -> {:ok, Enum.reverse(list)}
+    end
+  end
+
+  defp sanitize_streams(_streams), do: {:error, "bad streams"}
 
   defp finish(base, msg, sender) do
     envelope =

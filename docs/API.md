@@ -535,7 +535,7 @@ Once open, the switch sends:
 `ice_servers` is `Turn.credentials/1` — empty until the operator sets
 `JG_TURN_URLS` / `JG_TURN_SECRET`, which is the normal path on a tailnet.
 
-The client then sends one of five frames:
+The client then sends one of six frames:
 
 ```json
 {"type": "offer",  "sdp": "v=0…", "to": "jti-or-absent"}
@@ -545,10 +545,27 @@ The client then sends one of five frames:
 {"type": "video", "want": "on", "to": "jti"}
 ```
 
-`video` is the pull request: the listener asks the publisher for its camera, and
+`video` is the pull request: the listener asks the publisher for a picture, and
 the publisher answers with a new offer carrying a video track. Passing
 `"want": "off"` asks it to stop. The feed is only ever sent because someone
-asked for it.
+asked for it; what the picture *is* (camera, screen, a canvas) is the
+publisher's choice and is not in the protocol.
+
+A room's citizen — the house that signed the rental — may also broadcast many
+streams at once:
+
+```json
+{"type": "broadcast", "on": "yes",
+ "streams": [{"id": "0f2c…", "label": "Studio 1", "kind": "audio"},
+             {"id": "9a71…", "label": "Camera",   "kind": "video"}]}
+```
+
+Each `id` is the `MediaStream.id` the sender put on the tracks, so a listener
+can match a track it receives to the name it was given; `kind` is `audio` or
+`video`, at most twelve streams, and the label is a display name the listener
+may translate. `{"on": "no", "streams": []}` ends the broadcast. The relay does
+not police who may broadcast; a room's roles and the house's own grant say who
+the citizen is. The microphone remains its own track and is not in this list.
 
 The switch stamps every relayed frame with `from` (the grant's subject),
 `from_jti` and `at`; a client-supplied `from` is discarded. With `to` the frame
