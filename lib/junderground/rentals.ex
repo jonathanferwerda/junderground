@@ -39,10 +39,17 @@ defmodule Junderground.Rentals do
         "issued" => System.system_time(:second),
         "start" => start_at,
         "end" => end_at,
+        "guest_start" => start_at,
+        "guest_end" => end_at,
+        "citizen" => handle,
         "label" => "",
         "event" => "",
         "sku" => "",
-        "capacity" => 100
+        "capacity" => 100,
+        "fee" => 0,
+        "currency" => "CAD",
+        "guest_price" => 0,
+        "guest_currency" => "CAD"
       },
       fields
     )
@@ -52,10 +59,41 @@ defmodule Junderground.Rentals do
   def list(handle, room), do: GenServer.call(__MODULE__, {:list, handle, room})
   def active(handle, room), do: GenServer.call(__MODULE__, {:active, handle, room})
   def next(handle, room), do: GenServer.call(__MODULE__, {:next, handle, room})
+  def current(handle, room), do: GenServer.call(__MODULE__, {:current, handle, room})
 
   @doc "Owner nil when the room has no rentals; the active one; or `:owner`."
-  def open_for(handle, room, requester) do
-    GenServer.call(__MODULE__, {:open_for, handle, room, requester})
+  def open_for(handle, room, requester, role \\ "guest") do
+    GenServer.call(__MODULE__, {:open_for, handle, room, requester, role})
+  end
+
+  @doc """
+  Quote the switch's flat rental fee.
+
+  The base fee is set by the administrator; the rate falls with **specificity**:
+  the more non-wildcard constructs a room names, the less the rental costs.
+  `blocks` is the number of contiguous blocks rented; it sets the duration, not
+  the fee — a rental is a flat rate.
+  """
+  def quote(scope, blocks) when is_map(scope) and is_integer(blocks) and blocks > 0 do
+    base = Application.get_env(:junderground, :rent_base_fee, 0)
+    currency = Application.get_env(:junderground, :rent_currency, "CAD")
+    block_seconds = Application.get_env(:junderground, :rent_block_seconds, 4 * 3600)
+    rates = Application.get_env(:junderground, :rent_rate_percent, [100, 50, 25])
+
+    non_wildcards = map_size(scope)
+    index = min(max(non_wildcards, 1), length(rates)) - 1
+    rate = Enum.at(rates, index, List.last(rates))
+    fee = round(base * rate / 100)
+
+    %{
+      "non_wildcards" => non_wildcards,
+      "blocks" => blocks,
+      "block_seconds" => block_seconds,
+      "seconds" => blocks * block_seconds,
+      "rate_percent" => rate,
+      "fee" => fee,
+      "currency" => currency
+    }
   end
 
   def cancel(handle, room, id), do: GenServer.call(__MODULE__, {:cancel, handle, room, id})
@@ -125,17 +163,19 @@ defmodule Junderground.Rentals do
 
   def handle_call({:next, handle, room}, _from, state) do
     now = System.system_time(:second)
-
-    next =
-      live(handle, room)
-      |> Enum.filter(&(&1["record"]["start"] > now))
-      |> Enum.sort_by(& &1["record"]["start"])
-      |> List.first()
-
-    {:reply, {:ok, maybe_view(next)}, state}
+    {:reply, {:ok, maybe_view(next_rental(handle, room, now))}, state}
   end
 
-  def handle_call({:open_for, handle, room, requester}, _from, state) do
+  def handle_call({:current, handle, room}, _from, state) do
+    now = System.system_time(:second)
+
+    current =
+      active_rental(handle, room, now) || next_rental(handle, room, now)
+
+    {:reply, {:ok, maybe_view(current)}, state}
+  end
+
+  def handle_call({:open_for, handle, room, requester, role}, _from, state) do
     now = System.system_time(:second)
     rentals = live(handle, room)
 
@@ -144,14 +184,14 @@ defmodule Junderground.Rentals do
         rentals == [] ->
           {:ok, nil}
 
-        requester == handle ->
-          case active_rental(handle, room, now) do
+        (requester == handle or role == "citizen") and role == "citizen" ->
+          case active_for(rentals, now, "citizen") do
             nil -> {:ok, :owner}
             rental -> {:ok, view(rental)}
           end
 
         true ->
-          case active_rental(handle, room, now) do
+          case active_for(rentals, now, role) do
             nil -> {:error, :not_open}
             rental -> {:ok, view(rental)}
           end
@@ -223,6 +263,29 @@ defmodule Junderground.Rentals do
       record["end"] - record["start"] > @max_window ->
         {:error, :window_too_long}
 
+      not is_integer(record["guest_start"]) or not is_integer(record["guest_end"]) ->
+        {:error, :bad_guest_window}
+
+      not (record["start"] <= record["guest_start"] and
+             record["guest_start"] < record["guest_end"] and record["guest_end"] <= record["end"]) ->
+        {:error, :bad_guest_window}
+
+      not is_binary(record["citizen"]) or byte_size(record["citizen"]) > 64 ->
+        {:error, :bad_citizen}
+
+      not is_integer(record["fee"]) or record["fee"] < 0 ->
+        {:error, :bad_fee}
+
+      not is_integer(record["guest_price"]) or record["guest_price"] < 0 ->
+        {:error, :bad_guest_price}
+
+      not is_binary(record["currency"]) or not Regex.match?(~r/^[A-Z]{3}$/, record["currency"]) ->
+        {:error, :bad_currency}
+
+      not is_binary(record["guest_currency"]) or
+          not Regex.match?(~r/^[A-Z]{3}$/, record["guest_currency"]) ->
+        {:error, :bad_currency}
+
       not is_binary(record["label"]) or byte_size(record["label"]) > 200 ->
         {:error, :bad_label}
 
@@ -279,11 +342,33 @@ defmodule Junderground.Rentals do
     |> Enum.reject(& &1["cancelled"])
   end
 
+  defp next_rental(handle, room, now) do
+    live(handle, room)
+    |> Enum.filter(&(&1["record"]["start"] > now))
+    |> Enum.sort_by(& &1["record"]["start"])
+    |> List.first()
+  end
+
   defp active_rental(handle, room, now) do
     live(handle, room)
     |> Enum.find(fn rental ->
       record = rental["record"]
       record["start"] <= now and now < record["end"]
+    end)
+  end
+
+  # The citizen and residents use the whole rented block; a guest only the
+  # guest window the citizen chose inside it.
+  defp active_for(rentals, now, role) do
+    Enum.find(rentals, fn rental ->
+      record = rental["record"]
+
+      {from, until} =
+        if role == "guest",
+          do: {record["guest_start"], record["guest_end"]},
+          else: {record["start"], record["end"]}
+
+      from <= now and now < until
     end)
   end
 
@@ -299,11 +384,19 @@ defmodule Junderground.Rentals do
       "room" => record["room"],
       "start" => record["start"],
       "end" => record["end"],
+      "guest_start" => record["guest_start"],
+      "guest_end" => record["guest_end"],
+      "citizen" => record["citizen"],
       "label" => record["label"],
+      "fee" => record["fee"],
+      "currency" => record["currency"],
+      "guest_price" => record["guest_price"],
+      "guest_currency" => record["guest_currency"],
       "event" => record["event"],
       "sku" => record["sku"],
       "capacity" => record["capacity"],
-      "cancelled" => rental["cancelled"]
+      "cancelled" => rental["cancelled"],
+      "record" => record
     }
   end
 end

@@ -173,4 +173,57 @@ defmodule Junderground.HttpTest do
 
     assert scope == Junderground.Constructs.scope_id(dial)
   end
+
+  test "the feed carries advertised rooms and their rentals", %{pub: pub, priv: priv} do
+    house =
+      Record.build("register", "alpha", pub, 1, %{"name" => "Alpha"})
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Directory.register(house)
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "", 0)
+
+    room =
+      Rooms.build("alpha", "lobby", pub, 1, %{
+        "policy" => "open",
+        "advertised" => "yes",
+        "constructs" => %{"events" => "rock_show"}
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rooms.register(room)
+
+    now = System.system_time(:second)
+
+    rental =
+      Junderground.Rentals.build("alpha", "lobby", pub, 1, now + 60, now + 3_600, %{
+        "label" => "Rock Show"
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Junderground.Rentals.create(rental)
+
+    conn = call(Plug.Test.conn(:get, "/v1/feed"))
+    assert conn.status == 200
+
+    assert %{
+             "rooms" => [
+               %{"room" => %{"handle" => "alpha"}, "rentals" => [%{"label" => "Rock Show"}]}
+             ]
+           } =
+             JSON.decode!(conn.resp_body)
+  end
+
+  test "the rental quote falls with specificity" do
+    Application.put_env(:junderground, :rent_base_fee, 10_000)
+    Application.put_env(:junderground, :rent_rate_percent, [100, 50, 25])
+
+    on_exit(fn ->
+      Application.put_env(:junderground, :rent_base_fee, 0)
+      Application.put_env(:junderground, :rent_rate_percent, [100, 50, 25])
+    end)
+
+    conn = call(Plug.Test.conn(:get, "/v1/rental_quote?events=rock&communities=warwick"))
+    assert conn.status == 200
+    assert %{"fee" => 5_000, "non_wildcards" => 2} = JSON.decode!(conn.resp_body)
+  end
 end

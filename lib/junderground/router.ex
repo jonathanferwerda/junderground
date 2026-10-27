@@ -48,7 +48,8 @@ defmodule Junderground.Router do
         "peers",
         "presence",
         "tickets",
-        "rentals"
+        "rentals",
+        "passes"
       ],
       "peers" => peer_count(),
       "admission" => %{
@@ -81,6 +82,44 @@ defmodule Junderground.Router do
       |> Enum.map(&room_meta/1)
 
     json(conn, 200, %{"dial" => dial, "rooms" => rooms})
+  end
+
+  get "/v1/rental_quote" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    params = conn.query_params
+    {:ok, scope} = Constructs.normalize(Map.take(params, Constructs.names()))
+    blocks = params["blocks"] |> int_param(1) |> max(1)
+
+    if map_size(scope) == 0 do
+      fail(conn, :bad_scope)
+    else
+      json(conn, 200, Rentals.quote(scope, blocks))
+    end
+  end
+
+  get "/v1/feed" do
+    {:ok, heads} = Rooms.advertised()
+    {:ok, peers} = if Process.whereis(Peers), do: Peers.list(), else: {:ok, []}
+
+    rooms =
+      heads
+      |> Enum.filter(&Admission.admitted?(&1["record"]["handle"]))
+      |> Enum.map(fn head ->
+        {:ok, rentals} = Rentals.list(head["record"]["handle"], head["record"]["room"])
+
+        %{
+          "record" => head["record"],
+          "room" => room_meta(head),
+          "rentals" => rentals
+        }
+      end)
+
+    json(conn, 200, %{
+      "served_by" => Junderground.ServerKey.public_b64(),
+      "generated_at" => System.system_time(:second),
+      "rooms" => rooms,
+      "peers" => peers
+    })
   end
 
   # ---- other jundergrounds ---------------------------------------------
@@ -438,6 +477,33 @@ defmodule Junderground.Router do
          :ok <- same_handle(requester, handle),
          {:ok, tickets} <- Rooms.list_tickets(handle, room) do
       json(conn, 200, %{"tickets" => tickets})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/rooms/:handle/:room/passes" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             {:ok, pass} <-
+               Rooms.issue_ticket(handle, room, requester, Map.put_new(body, "role", "resident")) do
+          json(conn, 201, pass)
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/rooms/:handle/:room/passes" do
+    with {:ok, requester} <- Auth.verify(conn, ""),
+         :ok <- same_handle(requester, handle),
+         {:ok, tickets} <- Rooms.list_tickets(handle, room) do
+      passes = Enum.filter(tickets, &(&1["role"] == "resident"))
+      json(conn, 200, %{"passes" => passes})
     else
       {:error, reason} -> fail(conn, reason)
     end
@@ -850,6 +916,15 @@ defmodule Junderground.Router do
   defp status_for(:bad_meta), do: 422
   defp status_for(:bad_uses), do: 422
   defp status_for(:bad_expires), do: 422
+  defp status_for(:bad_scope), do: 422
+  defp status_for(:bad_guest_window), do: 422
+  defp status_for(:bad_citizen), do: 422
+  defp status_for(:bad_fee), do: 422
+  defp status_for(:bad_guest_price), do: 422
+  defp status_for(:bad_currency), do: 422
+  defp status_for(:bad_role), do: 422
+  defp status_for(:bad_grants), do: 422
+  defp status_for(:bad_warranty), do: 422
 
   defp status_for(reason)
        when reason in [

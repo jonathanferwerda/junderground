@@ -53,8 +53,8 @@ defmodule Junderground.RentalsTest do
     assert {:ok, _} =
              Rentals.create(rental(pub, priv, 1, now + 3600, now + 7200))
 
-    assert {:ok, :owner} = Rentals.open_for("alpha", "lobby", "alpha")
-    assert {:error, :not_open} = Rentals.open_for("alpha", "lobby", "beta")
+    assert {:ok, :owner} = Rentals.open_for("alpha", "lobby", "alpha", "citizen")
+    assert {:error, :not_open} = Rentals.open_for("alpha", "lobby", "beta", "guest")
   end
 
   test "cancel frees the window", %{pub: pub, priv: priv} do
@@ -71,5 +71,38 @@ defmodule Junderground.RentalsTest do
 
     assert {:error, :window_too_long} =
              Rentals.create(rental(pub, priv, 1, now, now + 13 * 3600))
+  end
+
+  test "the fee falls with specificity and is flat per rental" do
+    Application.put_env(:junderground, :rent_base_fee, 10_000)
+    Application.put_env(:junderground, :rent_currency, "CAD")
+    Application.put_env(:junderground, :rent_block_seconds, 3_600)
+    Application.put_env(:junderground, :rent_rate_percent, [100, 50, 25])
+
+    on_exit(fn ->
+      Application.put_env(:junderground, :rent_base_fee, 0)
+      Application.put_env(:junderground, :rent_rate_percent, [100, 50, 25])
+    end)
+
+    q1 = Rentals.quote(%{"events" => "rock"}, 2)
+    q2 = Rentals.quote(%{"events" => "rock", "communities" => "warwick"}, 2)
+    q3 = Rentals.quote(%{"events" => "rock", "communities" => "warwick", "teams" => "band"}, 2)
+
+    assert q1["fee"] == 10_000
+    assert q1["seconds"] == 7_200
+    assert q2["fee"] == 5_000
+    assert q3["fee"] == 2_500
+  end
+
+  test "the guest window must sit inside the rental", %{pub: pub, priv: priv} do
+    now = System.system_time(:second)
+
+    assert {:error, :bad_guest_window} =
+             Rentals.create(
+               rental(pub, priv, 1, now, now + 3_600, %{
+                 "guest_start" => now + 1_800,
+                 "guest_end" => now + 7_200
+               })
+             )
   end
 end

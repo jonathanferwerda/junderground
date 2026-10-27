@@ -60,6 +60,16 @@ cowlib's current release carries an open advisory).
 - **Bound vs bearer is a security boundary.** A bound ticket must be spent by
   its subject; a bearer ticket is transferable by design (the store sold it).
   Do not silently turn one into the other.
+- **Roles make the caps.** A grant's role is `citizen`, `resident` or `guest`;
+  a guest never exceeds the guest base caps, and a resident pass cannot mint
+  tickets. Do not let a ticket's `role` change at redemption.
+- **The guest window is inside the rental.** Guests are admitted only between
+  `guest_start` and `guest_end`; tickets and grants clamp to it. The citizen and
+  residents use the whole block.
+- **The switch quotes fees; it never charges.** `Rentals.quote` reads the
+  administrator's table; `fee` and `guest_price` are data for the store.
+- **A feed is self-verifying.** Every room and rental in `/v1/feed` carries its
+  own signature; a relay may be stale but never authoritative.
 - **A citizen ticket is never stored here.** It is jawnos' delegated login, not
   a room admission; the switch only knows a room ticket and its subject.
 

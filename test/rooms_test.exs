@@ -316,4 +316,84 @@ defmodule Junderground.RoomsTest do
     assert {:error, :ticket_spent} =
              Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
   end
+
+  test "a resident pass carries the band, with resident caps", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    rental =
+      Rentals.build("alpha", "lobby", pub, 1, now - 60, now + 3_600, %{
+        "guest_start" => now - 60,
+        "guest_end" => now + 3_600,
+        "citizen" => "alpha"
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rentals.create(rental)
+
+    assert {:ok, pass} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "role" => "resident",
+               "sub" => "beta",
+               "bind" => "subject"
+             })
+
+    assert pass["role"] == "resident"
+    assert pass["expires"] <= now + 3_600
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{
+               "caps" => ["join", "publish_audio", "publish_video"],
+               "ticket" => pass["ticket"]
+             })
+
+    assert grant["role"] == "resident"
+    assert "publish_video" in grant["caps"]
+    refute "moderate" in grant["caps"]
+  end
+
+  test "a guest is only admitted inside the guest window", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    rental =
+      Rentals.build("alpha", "lobby", pub, 1, now - 60, now + 7_200, %{
+        "guest_start" => now + 3_600,
+        "guest_end" => now + 7_200
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rentals.create(rental)
+
+    assert {:ok, ticket} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "sub" => "beta",
+               "expires" => now + 7_200
+             })
+
+    assert {:error, :not_open} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
+  end
+
+  test "a ticket says what it can do and carries a warranty", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    assert {:ok, ticket} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "sub" => "beta",
+               "grants" => ["room:alpha/lobby", "store:the_greatest_band"],
+               "warranty" => %{
+                 "terms" => "refund if the show is cancelled",
+                 "until" => now + 86_400,
+                 "covers" => ["entry", "merch"]
+               }
+             })
+
+    assert "store:the_greatest_band" in ticket["grants"]
+    assert ticket["warranty"]["terms"] =~ "refund"
+  end
 end

@@ -140,9 +140,12 @@ modes:
 | --- | --- | --- |
 | person | required | none |
 | bind | `subject` | `bearer` |
+| role | `guest` or `resident` | `guest` |
 | uses | 1 | 1..100 |
-| expires | 7 days | clamped to the rental |
+| expires | clamped to the window | clamped to the window |
 | meta | — | sku, seat, event |
+| grants | `room:…` | `room:…`, `store:…` |
+| warranty | — | terms, covers, until |
 
 A **private** ticket is for a spouse, a parent, a guest: only that person can
 spend it. An **event** ticket is a concert ticket: anyone admitted can spend one
@@ -155,28 +158,51 @@ Before selling tickets, the owner reserves the room:
 
 ```
 Room: lobby                 Label: The Greatest Band
-Start: 2026-12-23 18:00     End: 2026-12-23 22:00
+Rental: 2026-12-23 18:00–22:00
+Guests: 2026-12-23 18:30–21:30
 Event: rock_show            Capacity: 120
+Guest price: $25.00         Switch fee: $50.00
 ```
 
 The editor shows the schedule (past, active, upcoming), refuses overlaps, and
-marks the active window. While a window is active the room is open; outside it
-the room is closed to everyone but the owner. Tickets minted for the event end
-with the window, so a ticket cannot outlive the show.
+marks the active window. The **guest window** is chosen inside the rental, down
+to a minute. While a window is active the room is open; outside it the room is
+closed to everyone but the owner. Tickets minted for the event end with the
+guest window, so a ticket cannot outlive the show.
+
+The **switch fee** comes from `GET /v1/rental_quote`; it falls with
+specificity (the default is 100% for one defined construct, 50% for two, 25%
+for three). The **guest price** is the renter's own, recorded as data; the store
+charges it.
+
+### Roles
+
+The room uses the same three roles:
+
+- **Citizen** — the person who signed the rental. Full control: passes, tickets,
+  moderation, recording if allowed.
+- **Resident** — band, manager, publicist, entourage. A free pass, no purchase,
+  full audio/video, to the end of the rental.
+- **Guest** — a paying attendee. The guest window only, audio, no recording or
+  invites.
 
 The storefront, the price, the payment and the broadcast belong to jawnos; the
 chat app only asks the switch for the window and the tickets.
 
-### Three tickets, three jobs
+### Tickets, passes, and the store
 
-- **Citizen ticket** (jawnos): "may this person log in to a relationship's
-  manager?" The parent, the POA, the fingerprint authorization. No room.
-- **Room ticket** (junderground): "may this person enter this room, how many
-  times, until when?" Bound or bearer.
-- **Invite** (junderground): a bearer grant for an `invite` room, for a guest
-  whose identity is not a house handle yet.
+> **You buy a ticket; you carry a pass.**
 
-Do not merge them in the UI. They answer different questions.
+- **Ticket** — sold admission (price, uses, warranty, window).
+- **Pass** — a role you hold (citizen, resident, guest, staff, store access).
+- **Citizen ticket** (jawnos) — a delegated login to a relationship's manager;
+  recommend labelling it **citizen pass**.
+- **Store pass** — merch access, carried in the ticket's `grants`
+  (`store:the_greatest_band`); the ticket's `warranty` records the promise.
+
+A ticket can carry both a room grant and a store grant. The switch enforces the
+room; the store verifies the rest. A warranty is inside the signed ticket, so it
+is genuinely the seller's promise, not a note beside it.
 
 ## What the chat app must not do
 

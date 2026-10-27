@@ -3,9 +3,9 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*. **v0.1.3 makes a dial partial (a blank
-construct is a wildcard), adds rentals and event tickets, and separates a
-citizen ticket from a room ticket.**
+today unless it is marked *planned*. **v0.1.4 adds the citizen/resident/guest
+role shape to rooms, guest windows, the rental fee quote, resident passes, and
+the public feed a chain of jundergrounds can re-serve.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -337,6 +337,27 @@ POST /v1/rooms/alpha/lobby/tickets
 - `meta` is opaque strings for the seller: sku, seat, event. The switch does not
   interpret it and never sees a price.
 
+### Roles
+
+A grant carries a `role`, the same shape jawnos uses:
+
+| Role | Who | Capabilities |
+| --- | --- | --- |
+| `citizen` | the room owner, or the rental's `citizen` | join, publish, subscribe, moderate, invite, record (if the room allows) |
+| `resident` | a holder of a resident pass: band, manager, publicist, entourage | join, publish, subscribe, plus what the pass grants |
+| `guest` | a paying attendee, or a visitor to an open room | join, subscribe, publish_audio |
+
+A **resident pass** is a ticket with `role: "resident"`, bound to a subject and
+issued by the citizen. It lasts to the end of the rental and needs no purchase:
+
+```json
+POST /v1/rooms/alpha/lobby/passes
+{"sub": "beta", "bind": "subject", "caps": ["join", "publish_audio", "publish_video"]}
+```
+
+`GET …/passes` lists the residents. The same `POST …/tickets` with
+`"role": "resident"` is the underlying call.
+
 The ticket is stored server-side (uses, expiry, revoker) and is spent one use at
 a time by `POST …/token` with `{"ticket": "JG1…"}`. A spent, expired, revoked or
 wrong-subject ticket is refused. `GET …/tickets` (owner only) lists what is
@@ -369,12 +390,37 @@ POST /v1/rooms/alpha/lobby/rentals
   overlap.
 - A room with rentals is **closed outside them**. The owner may enter to set up;
   everyone else needs the active window.
+- `start`/`end` are the rented block; `guest_start`/`guest_end` are the window
+  the citizen opens to guests. It can be any sub-window, down to one minute of
+  a twelve-hour block. Guests are admitted only inside it; residents and the
+  citizen use the whole block.
 - `GET …/rentals` lists the schedule, `GET …/rentals/active` is the current
   window (or `409 not_open`), `POST …/rentals/:id/cancel` frees it.
 - Grants and tickets minted while a rental is active end with it: `exp` is
   clamped to `end`, and the grant carries `rental`.
 - A ticket minted for an upcoming rental is clamped to that window too, so a
   concert ticket cannot outlive the show.
+
+The two prices are recorded as data, never charged here:
+
+```json
+{"fee": 5000, "currency": "CAD", "guest_price": 2500, "guest_currency": "CAD"}
+```
+
+- `fee` is the switch's flat rental fee; `guest_price` is what the renter
+  charges for a ticket. jawnos' store does the charging.
+- `GET /v1/rental_quote?events=rock_show&communities=warwick&blocks=2` returns
+  the administrator's quote:
+
+```json
+{"non_wildcards": 2, "blocks": 2, "block_seconds": 14400, "seconds": 28800,
+ "rate_percent": 50, "fee": 5000, "currency": "CAD"}
+```
+
+The rate table is the administrator's: one non-wildcard construct is the base
+rate, two and three are cheaper. The default is 100/50/25 percent; set
+`JG_RENT_RATE_PERCENT` to change it. `blocks` sets the duration; the fee is a
+flat rate for the rental, not per block.
 
 **The store and the studio are jawnos'.** junderground never sees a price, a
 payment, or a SKU list; it sees a window, a capacity and a label. Selling the
@@ -396,6 +442,27 @@ The two are deliberately separate. A person may hold both; junderground never
 needs to learn who has delegated access to whose manager. If an event buyer is
 not a house handle yet, the store can hand them a bearer room ticket and keep
 the citizen ticket on the jawnos side.
+
+## 4g. Tickets, passes, and the store
+
+Four things have been called a ticket. The rule that keeps them apart:
+
+> **You buy a ticket; you carry a pass.**
+
+- **Ticket** — a sold admission: a seller, a price, a use count, a warranty and
+  a window. The concert ticket and the room ticket.
+- **Pass** — a role you hold: citizen, resident, guest; staff, entourage, store
+  access. A resident pass is free and bound to a person.
+- **Citizen ticket** (jawnos) — a delegated login to a relationship's manager.
+  Recommend renaming the label to **citizen pass**; the internal key can stay.
+- **Store pass** — access to the band's merch store. It can ride in the ticket's
+  `grants` list (`store:the_greatest_band`), and the ticket's `warranty` records
+  what the seller promises (entry, merch, refund).
+
+A ticket says what it can do through `grants`; the switch enforces only
+`room:<handle>/<room>`. Everything else is for the store to verify. The
+`warranty` is signed by the ticket issuer because it is inside the ticket, and
+the switch records it without adjudicating it.
 
 ## 5. Signed requests
 
@@ -776,7 +843,10 @@ The agent's own record of a review, separate from a status change:
 | `bad_verdict` / `bad_cap` / `bad_subject` / `bad_bind` / `bad_meta` | 422 | malformed review or ticket |
 | `bad_window` / `window_too_long` | 422 | malformed or over-long rental |
 | `overlap` | 409 | the rental window intersects another |
-| `not_open` | 409 | outside a rental window, or a rental already ended |
+| `not_open` | 409 | outside a rental or guest window |
+| `bad_guest_window` | 422 | the guest window is not inside the rental |
+| `bad_role` / `bad_grants` / `bad_warranty` | 422 | malformed pass or ticket |
+| `bad_scope` / `bad_citizen` / `bad_fee` / `bad_currency` | 422 | malformed rental or quote |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation
@@ -791,6 +861,23 @@ Many jundergrounds are expected. Nothing here needs consensus:
 - a divergent chain (two different records at the same `seq`) is reported, not
   silently chosen. Resolving it is a client policy decision: highest `seq`, then
   the record whose `prev` matches the client's own last-seen signature.
+
+### Feeds and chaining
+
+`GET /v1/feed` is the public, self-verifying bundle a relay can re-serve:
+
+```json
+{"served_by": "…", "generated_at": 1760000000,
+ "rooms": [{"record": {…signed room…}, "room": {…meta…}, "rentals": [ {…signed rental…} ]}],
+ "peers": [ {…approved peer…} ]}
+```
+
+Every room and rental carries its own signature, so a peer can cache the feed,
+re-serve it, and be wrong only about freshness — never about authorship.
+Jundergrounds can chain: A pulls B, B pulls C, and a client may query any of
+them. There is no consensus and no authoritative server; a client prefers the
+newest room head and verifies the chain. The media plane scales separately from
+the feed (SFU regions and CDN caches for the read side).
 
 ## 12. Media plane (planned)
 

@@ -8,6 +8,13 @@ if config_env() != :test do
     grant_ttl: String.to_integer(System.get_env("JG_GRANT_TTL") || "900"),
     admin_keys: (System.get_env("JG_ADMIN_KEYS") || "") |> String.split(",", trim: true),
     auto_approve: System.get_env("JG_AUTO_APPROVE") == "1",
+    rent_base_fee: String.to_integer(System.get_env("JG_RENT_BASE_FEE") || "0"),
+    rent_currency: System.get_env("JG_RENT_CURRENCY") || "CAD",
+    rent_block_seconds: String.to_integer(System.get_env("JG_RENT_BLOCK_SECONDS") || "14400"),
+    rent_rate_percent:
+      (System.get_env("JG_RENT_RATE_PERCENT") || "100,50,25")
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.to_integer/1),
     turn_urls: (System.get_env("JG_TURN_URLS") || "") |> String.split(",", trim: true),
     turn_secret: System.get_env("JG_TURN_SECRET"),
     sfu_url: System.get_env("JG_SFU_URL"),

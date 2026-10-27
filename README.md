@@ -8,12 +8,13 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.3** — the directory, the record chain, administrator approval
+> Status: **v0.1.4** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
-> for other jundergrounds, presence and house-side relationship grading, room
-> tickets (bound and bearer), room rentals and event windows, private rooms,
-> grants, revocations, TURN credentials and the HTTP API are implemented and
-> tested (73 tests). The media plane (signaling, SFU, coturn deployment) is
+> for other jundergrounds, presence and house-side relationship grading,
+> citizen/resident/guest room roles, resident passes, room tickets (bound and
+> bearer), rentals with guest windows and a fee quote, private rooms, grants,
+> revocations, TURN credentials, the public feed and the HTTP API are implemented
+> and tested (80 tests). The media plane (signaling, SFU, coturn deployment) is
 > designed but not built. See `docs/API.md` for the contract,
 > `docs/CHAT-ADMIN.md` for the administrator's screen, and the boundary below.
 
@@ -55,6 +56,16 @@ the viewer's dial.
 ticket carries a use count and is sold in the store; a rental window decides
 when the room is open and caps every ticket at its end. A private conversation
 is a `direct` room and a visit to a house is a ticket-bound room.
+
+**Rooms use the house's privilege shape.** The citizen signed the rental, residents
+(band, manager, publicist, entourage) hold free passes, and guests buy tickets
+for the guest window the citizen chose inside the rental. The switch's flat fee
+falls as a room gets more specific; the renter's guest price is recorded, and the
+store charges it.
+
+**A chain of jundergrounds can re-serve one feed.** `/v1/feed` carries signed
+room and rental records, so any peer can cache and relay it; a client verifies
+authorship, not the relay.
 
 **Citizen tickets are not room tickets.** A citizen ticket is jawnos' delegated
 login to a relationship's manager (the parent, the POA, the fingerprint); a room
@@ -103,7 +114,10 @@ The switch generates its Ed25519 identity on first boot at
 | Peer onboarding for other jundergrounds | done |
 | Presence roster and house-side relationship grading | done |
 | Room tickets (bound and bearer), direct/private rooms | done |
-| Room rentals, event windows, tickets clamped to a window | done |
+| Room rentals, guest windows, tickets clamped to a window | done |
+| Citizen/resident/guest roles and free resident passes | done |
+| Switch rental fee quote and the renter's guest price | done |
+| Public feed for chaining jundergrounds | done |
 | Agent review endpoint and instant suspension (epoch) | done |
 | Abuse reports and the admin/agent queue | done |
 | Crest binding (crest key = signing key) | done |
@@ -160,3 +174,4 @@ The signed bytes are the same convention jawnos already uses for crests
    join a room, and let the call bot be a room participant.
 6. The Chat app's Underground section, per `docs/CHAT-ADMIN.md`.
 7. The jawnos dial must adopt the partial-scope rule in `Constructs`.
+8. Rename the jawnos "citizen ticket" label to **citizen pass** in the UI.

@@ -1,24 +1,24 @@
 # junderground checkpoint
 
-## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 23:00 UTC
+## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 23:10 UTC
 
-Goal: v0.1.3 — partial dial scopes, room rentals and event windows, bearer
-event tickets, and the citizen-ticket boundary.
+Goal: v0.1.4 — citizen/resident/guest room roles, resident passes, guest
+windows, rental fee quote and renter price, public feed for chaining.
 
 Done:
-- `constructs.ex` rewritten: blank constructs are undefined (wildcards), rooms
-  match by `room_scope ⊆ dial`, `scope_id`, suggestions only for the UI.
-- `rentals.ex`: signed windows (≤ 12h, no overlap), active/next, `open_for`,
-  cancel; rooms closed outside their windows; grants and tickets clamped to the
-  window end.
-- `rooms.ex`: `dial/1`, `scope`, ticket `bind` (subject/bearer), `meta`, rental
-  claim, rental-aware verification.
-- `router.ex`: rentals endpoints, new dial response, ticket fields.
-- Docs: partial dial, rentals, citizen-vs-room ticket boundary.
-- 73 tests pass.
+- `rooms.ex`: role resolution (citizen/resident/guest), role caps, resident
+  passes (`/passes`), tickets carry `role`, `grants`, `warranty`, guest-window
+  clamping.
+- `rentals.ex`: `guest_start`/`guest_end`, `citizen`, `fee`, `guest_price`,
+  `Rentals.quote/2`, role-aware `open_for/4`.
+- `router.ex`: `/v1/rental_quote`, `/v1/rooms/:h/:r/passes`, `/v1/feed`.
+- Config: `rent_base_fee`, `rent_currency`, `rent_block_seconds`,
+  `rent_rate_percent`.
+- Docs: roles, fees, guest windows, the ticket/pass naming rule, feed chaining.
+- 80 tests pass.
 
 Next:
-1. Commit v0.1.3 (this file goes with it).
+1. Commit v0.1.4 (this file goes with it).
 2. Signaling channel + SFU adapter.
-3. jawnos client: partial dial, roster grading, join, event ticket purchase.
-4. Chat app Underground section and the rental editor.
+3. jawnos client: partial dial, role-aware join, roster grading, store tickets.
+4. Chat app Underground section and rental editor.

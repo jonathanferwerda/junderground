@@ -67,6 +67,7 @@ defmodule Junderground.Rooms do
   def latest(handle, room), do: GenServer.call(__MODULE__, {:latest, handle, room})
   def list(handle), do: GenServer.call(__MODULE__, {:list, handle})
   def dial(scope), do: GenServer.call(__MODULE__, {:dial, scope})
+  def advertised, do: GenServer.call(__MODULE__, :advertised)
 
   def grant(handle, room, requester, body) when is_map(body) do
     GenServer.call(__MODULE__, {:grant, handle, room, requester, body})
@@ -141,6 +142,17 @@ defmodule Junderground.Rooms do
     {:reply, {:ok, :dets.select(@table, ms)}, state}
   end
 
+  def handle_call(:advertised, _from, state) do
+    heads = :dets.select(@table, [{{{:room, :_, :_}, :"$1"}, [], [:"$1"]}])
+
+    open =
+      Enum.filter(heads, fn head ->
+        not head["tombstoned"] and head["advertised"]
+      end)
+
+    {:reply, {:ok, open}, state}
+  end
+
   def handle_call({:dial, scope}, _from, state) do
     heads = :dets.select(@table, [{{{:room, :_, :_}, :"$1"}, [], [:"$1"]}])
 
@@ -159,10 +171,12 @@ defmodule Junderground.Rooms do
            {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
            :ok <- owner_admitted(head["record"]["handle"]),
-           {:ok, rental} <- Rentals.open_for(handle, room, requester.handle),
            {:ok, ticket} <- consume_ticket(head["record"], requester, body["ticket"]),
+           {:ok, current} <- Rentals.current(handle, room),
+           role = role_for(head["record"], requester, ticket, current),
+           {:ok, rental} <- Rentals.open_for(handle, room, requester.handle, role),
            :ok <- access(head["record"], requester, body["invite"], ticket),
-           {:ok, caps} <- clamp(head["record"], requester, body["caps"], body["invite"], ticket) do
+           {:ok, caps} <- clamp(head["record"], body["caps"], body["invite"], ticket, role) do
         now = System.system_time(:second)
         probation = requester_record["status"] == "probation"
         ttl = Application.get_env(:junderground, :grant_ttl, 900)
@@ -174,8 +188,16 @@ defmodule Junderground.Rooms do
             else: caps
 
         room_exp = head["record"]["expires"] || 0
-        expires = if room_exp > 0, do: min(now + ttl, room_exp), else: now + ttl
-        expires = if is_map(rental), do: min(expires, rental["end"]), else: expires
+
+        window_exp =
+          if is_map(rental) do
+            if role == "guest", do: rental["guest_end"], else: rental["end"]
+          else
+            now + 365 * 86_400
+          end
+
+        floor = if room_exp > 0, do: min(now + ttl, room_exp), else: now + ttl
+        expires = min(floor, window_exp)
 
         payload =
           %{
@@ -189,6 +211,7 @@ defmodule Junderground.Rooms do
             "iat" => now,
             "exp" => expires,
             "epoch" => Admission.epoch(handle),
+            "role" => role,
             "jti" => random_id()
           }
           |> maybe_rental(rental)
@@ -198,6 +221,7 @@ defmodule Junderground.Rooms do
            "grant" => Token.mint(payload, ServerKey.private()),
            "room" => payload["room"],
            "subject" => requester.handle,
+           "role" => role,
            "caps" => caps,
            "expires" => expires,
            "ice_servers" => Turn.credentials(requester.handle, max(expires - now, 0))
@@ -234,16 +258,27 @@ defmodule Junderground.Rooms do
       with {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
            :ok <- owner_only(head["record"], requester),
+           {:ok, role} <- ticket_role(body["role"], requester, head["record"]),
            {:ok, bind} <- ticket_bind(body["sub"], body["bind"]),
            {:ok, sub} <- ticket_subject(body["sub"], bind),
            {:ok, caps} <- ticket_caps(body["caps"]),
-           {:ok, uses} <- ticket_uses(body["uses"]),
+           {:ok, uses} <- ticket_uses(body["uses"], role),
            {:ok, meta} <- ticket_meta(body["meta"]),
+           {:ok, grants} <- ticket_grants(body["grants"], handle, room),
+           {:ok, warranty} <- ticket_warranty(body["warranty"]),
            {:ok, expires} <- ticket_expiry(body["expires"]),
            {:ok, rental} <- rental_for_ticket(handle, room),
-           :ok <- ticket_window(expires, rental) do
+           :ok <- ticket_window(expires, rental, role) do
         now = System.system_time(:second)
-        expires = if is_map(rental), do: min(expires, rental["end"]), else: expires
+
+        window_end =
+          if is_map(rental) do
+            if role == "guest", do: rental["guest_end"], else: rental["end"]
+          else
+            now + 365 * 86_400
+          end
+
+        expires = min(expires, window_end)
         jti = random_id()
 
         payload =
@@ -254,8 +289,10 @@ defmodule Junderground.Rooms do
             "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
             "room" => handle <> "/" <> room,
             "room_key" => head["room_key"],
+            "role" => role,
             "bind" => bind,
             "meta" => meta,
+            "grants" => grants,
             "caps" => caps,
             "iat" => now,
             "exp" => expires,
@@ -265,12 +302,15 @@ defmodule Junderground.Rooms do
           }
           |> maybe_sub(sub)
           |> maybe_rental(rental)
+          |> maybe_warranty(warranty)
 
         stored =
           %{
             "room" => handle <> "/" <> room,
+            "role" => role,
             "bind" => bind,
             "meta" => meta,
+            "grants" => grants,
             "caps" => caps,
             "exp" => expires,
             "uses_left" => uses,
@@ -278,6 +318,7 @@ defmodule Junderground.Rooms do
           }
           |> maybe_sub(sub)
           |> maybe_rental(rental)
+          |> maybe_warranty(warranty)
 
         :dets.insert(@table, {{:ticket, jti}, stored})
 
@@ -287,8 +328,11 @@ defmodule Junderground.Rooms do
            "jti" => jti,
            "room" => payload["room"],
            "subject" => sub,
+           "role" => role,
            "bind" => bind,
            "meta" => meta,
+           "grants" => grants,
+           "warranty" => warranty,
            "caps" => caps,
            "expires" => expires,
            "uses" => uses
@@ -309,7 +353,10 @@ defmodule Junderground.Rooms do
         %{
           "jti" => jti,
           "subject" => stored["sub"],
+          "role" => stored["role"] || "guest",
           "bind" => stored["bind"] || "subject",
+          "grants" => stored["grants"] || [],
+          "warranty" => stored["warranty"],
           "meta" => stored["meta"] || %{},
           "rental" => stored["rental"],
           "caps" => stored["caps"],
@@ -419,6 +466,16 @@ defmodule Junderground.Rooms do
     if Admission.may_write?(handle), do: :ok, else: {:error, :not_admitted}
   end
 
+  defp role_for(record, requester, ticket, current) do
+    citizen = (is_map(current) and current["citizen"]) || record["handle"]
+
+    cond do
+      requester.handle in [record["handle"], citizen] -> "citizen"
+      is_map(ticket) and ticket["role"] == "resident" -> "resident"
+      true -> "guest"
+    end
+  end
+
   defp requester_admitted(%{"status" => status}) when status in ["approved", "probation"], do: :ok
   defp requester_admitted(_record), do: {:error, :not_admitted}
 
@@ -498,7 +555,7 @@ defmodule Junderground.Rooms do
 
   defp invite_ok?(_token, _record), do: false
 
-  defp clamp(record, requester, requested, invite, ticket) do
+  defp clamp(record, requested, invite, ticket, role) do
     requested =
       if is_list(requested) and requested != [] do
         requested
@@ -506,10 +563,17 @@ defmodule Junderground.Rooms do
         ["join", "publish_audio", "subscribe"]
       end
 
-    owner = requester.handle == record["handle"]
+    base =
+      case role do
+        "citizen" -> ["join", "publish_audio", "publish_video", "subscribe"]
+        "resident" -> ["join", "publish_audio", "publish_video", "subscribe"]
+        _guest -> ["join", "publish_audio", "subscribe"]
+      end
 
-    owner_caps = if owner, do: ["moderate", "invite"], else: []
-    record_caps = if owner and record["recording"] == "allow", do: ["record"], else: []
+    owner_caps = if role == "citizen", do: ["moderate", "invite"], else: []
+
+    record_caps =
+      if role == "citizen" and record["recording"] == "allow", do: ["record"], else: []
 
     invited_caps =
       case verify_grant_token(invite) do
@@ -517,14 +581,21 @@ defmodule Junderground.Rooms do
         _ -> []
       end
 
+    ticket_caps = if ticket, do: Enum.filter(ticket["caps"] || [], &(&1 in @caps)), else: []
+
     allowed =
-      if ticket do
-        MapSet.new(ticket["caps"] || [])
-      else
-        MapSet.new(
-          ["join", "publish_audio", "publish_video", "subscribe"] ++
-            owner_caps ++ record_caps ++ invited_caps
-        )
+      case {role, ticket} do
+        {"citizen", _} ->
+          MapSet.new(base ++ owner_caps ++ record_caps ++ ticket_caps ++ invited_caps)
+
+        {"resident", ticket} when is_map(ticket) ->
+          MapSet.new(base ++ ticket_caps)
+
+        {"guest", ticket} when is_map(ticket) ->
+          MapSet.intersection(MapSet.new(base), MapSet.new(ticket_caps))
+
+        _ ->
+          MapSet.new(base ++ invited_caps)
       end
 
     cond do
@@ -622,6 +693,9 @@ defmodule Junderground.Rooms do
   defp maybe_sub(payload, nil), do: payload
   defp maybe_sub(payload, sub), do: Map.put(payload, "sub", sub)
 
+  defp maybe_warranty(payload, nil), do: payload
+  defp maybe_warranty(payload, warranty), do: Map.put(payload, "warranty", warranty)
+
   # ---- tickets -------------------------------------------------------------
 
   def issue_ticket(handle, room, requester, body) do
@@ -645,6 +719,7 @@ defmodule Junderground.Rooms do
              :ok <- ticket_for_subject(payload, requester),
              {:ok, stored} <- ticket_lookup(payload["jti"]),
              :ok <- ticket_usable(stored, requester),
+             :ok <- ticket_role_match(payload, stored),
              :ok <- ticket_rental_window(payload, record) do
           :dets.insert(
             @table,
@@ -688,14 +763,36 @@ defmodule Junderground.Rooms do
   end
 
   # A ticket minted against a rental is only good while that window is open.
-  defp ticket_rental_window(%{"rental" => id}, record) when is_binary(id) do
+  defp ticket_role_match(%{"role" => role}, %{"role" => role}), do: :ok
+  defp ticket_role_match(_payload, _stored), do: {:error, :bad_ticket}
+
+  defp ticket_rental_window(%{"rental" => id} = payload, record) when is_binary(id) do
     case Rentals.active(record["handle"], record["room"]) do
-      {:ok, %{"id" => ^id}} -> :ok
-      _ -> {:error, :not_open}
+      {:ok, %{"id" => ^id} = rental} ->
+        now = System.system_time(:second)
+
+        {from, until} =
+          if payload["role"] == "guest",
+            do: {rental["guest_start"], rental["guest_end"]},
+            else: {rental["start"], rental["end"]}
+
+        if from <= now and now < until, do: :ok, else: {:error, :not_open}
+
+      _ ->
+        {:error, :not_open}
     end
   end
 
   defp ticket_rental_window(_payload, _record), do: :ok
+
+  defp ticket_role(nil, _requester, _record), do: {:ok, "guest"}
+  defp ticket_role("guest", _requester, _record), do: {:ok, "guest"}
+
+  defp ticket_role("resident", requester, record) do
+    if requester.handle == record["handle"], do: {:ok, "resident"}, else: {:error, :forbidden}
+  end
+
+  defp ticket_role(_role, _requester, _record), do: {:error, :bad_role}
 
   defp ticket_bind(nil, nil), do: {:ok, "bearer"}
   defp ticket_bind(sub, nil) when is_binary(sub), do: {:ok, "subject"}
@@ -742,13 +839,14 @@ defmodule Junderground.Rooms do
     end
   end
 
-  defp ticket_window(_expires, nil), do: :ok
+  defp ticket_window(_expires, nil, _role), do: :ok
 
-  defp ticket_window(expires, rental) when is_map(rental) do
+  defp ticket_window(expires, rental, role) when is_map(rental) do
     now = System.system_time(:second)
+    window_end = if role == "guest", do: rental["guest_end"], else: rental["end"]
 
     cond do
-      rental["end"] <= now -> {:error, :not_open}
+      window_end <= now -> {:error, :not_open}
       expires <= now -> {:error, :bad_expires}
       true -> :ok
     end
@@ -768,9 +866,45 @@ defmodule Junderground.Rooms do
 
   defp ticket_caps(_caps), do: {:error, :bad_cap}
 
-  defp ticket_uses(nil), do: {:ok, 1}
-  defp ticket_uses(n) when is_integer(n) and n >= 1 and n <= 100, do: {:ok, n}
-  defp ticket_uses(_n), do: {:error, :bad_uses}
+  defp ticket_uses(nil, "resident"), do: {:ok, 100}
+  defp ticket_uses(nil, _role), do: {:ok, 1}
+  defp ticket_uses(n, _role) when is_integer(n) and n >= 1 and n <= 100, do: {:ok, n}
+  defp ticket_uses(_n, _role), do: {:error, :bad_uses}
+
+  defp ticket_grants(nil, handle, room), do: {:ok, ["room:" <> handle <> "/" <> room]}
+
+  defp ticket_grants(list, _handle, _room) when is_list(list) and length(list) <= 10 do
+    if Enum.all?(list, &(is_binary(&1) and byte_size(&1) <= 200)),
+      do: {:ok, list},
+      else: {:error, :bad_grants}
+  end
+
+  defp ticket_grants(_list, _handle, _room), do: {:error, :bad_grants}
+
+  defp ticket_warranty(nil), do: {:ok, nil}
+
+  defp ticket_warranty(map) when is_map(map) do
+    terms = map["terms"]
+    until = map["until"]
+    covers = map["covers"]
+
+    cond do
+      not is_binary(terms) or byte_size(terms) > 2_000 ->
+        {:error, :bad_warranty}
+
+      not is_integer(until) or until < 0 ->
+        {:error, :bad_warranty}
+
+      not is_list(covers) or length(covers) > 10 or
+          not Enum.all?(covers, &(is_binary(&1) and byte_size(&1) <= 100)) ->
+        {:error, :bad_warranty}
+
+      true ->
+        {:ok, map}
+    end
+  end
+
+  defp ticket_warranty(_map), do: {:error, :bad_warranty}
 
   defp ticket_expiry(nil), do: {:ok, System.system_time(:second) + 7 * 86_400}
 
