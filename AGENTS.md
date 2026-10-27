@@ -63,6 +63,10 @@ cowlib's current release carries an open advisory).
 - **Roles make the caps.** A grant's role is `citizen`, `resident` or `guest`;
   a guest never exceeds the guest base caps, and a resident pass cannot mint
   tickets. Do not let a ticket's `role` change at redemption.
+- **The door is enforced by the switch, not the client.** Five minutes before a
+  rental, non-ticketed occupants are told; the last minute refuses new
+  non-ticketed grants; at the start their presence and existing grants die.
+  Do not soften this to a display-only warning.
 - **The guest window is inside the rental.** Guests are admitted only between
   `guest_start` and `guest_end`; tickets and grants clamp to it. The citizen and
   residents use the whole block.

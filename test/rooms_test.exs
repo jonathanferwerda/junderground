@@ -264,8 +264,15 @@ defmodule Junderground.RoomsTest do
 
     assert {:ok, active_view} = Rentals.create(active)
 
+    assert {:ok, pass} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "role" => "resident",
+               "sub" => "beta",
+               "bind" => "subject"
+             })
+
     assert {:ok, grant} =
-             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => pass["ticket"]})
 
     assert grant["expires"] <= active_view["end"]
   end
@@ -395,5 +402,56 @@ defmodule Junderground.RoomsTest do
 
     assert "store:the_greatest_band" in ticket["grants"]
     assert ticket["warranty"]["terms"] =~ "refund"
+  end
+
+  test "the last minute before a rental is closed to non-ticketed people", %{
+    pub: pub,
+    priv: priv
+  } do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "open"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    rental =
+      Rentals.build("alpha", "lobby", pub, 1, now + 30, now + 3_600)
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rentals.create(rental)
+
+    assert {:error, :door_closed} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+
+    # the owner and a resident pass still get in
+    assert {:ok, _} = Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+
+    assert {:ok, pass} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "role" => "resident",
+               "sub" => "beta",
+               "bind" => "subject"
+             })
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => pass["ticket"]})
+
+    assert grant["ticketed"] == true
+  end
+
+  test "an older non-ticketed grant dies when the doors close", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "open"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+
+    assert {:ok, _} = Rooms.verify_grant(grant["grant"])
+
+    rental =
+      Rentals.build("alpha", "lobby", pub, 1, now + 30, now + 3_600)
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rentals.create(rental)
+    assert {:error, :door_closed} = Rooms.verify_grant(grant["grant"])
   end
 end

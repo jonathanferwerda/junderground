@@ -174,6 +174,8 @@ defmodule Junderground.Rooms do
            {:ok, ticket} <- consume_ticket(head["record"], requester, body["ticket"]),
            {:ok, current} <- Rentals.current(handle, room),
            role = role_for(head["record"], requester, ticket, current),
+           ticketed = is_map(ticket) or role in ["citizen", "resident"],
+           :ok <- door_policy(handle, room, ticketed),
            {:ok, rental} <- Rentals.open_for(handle, room, requester.handle, role),
            :ok <- access(head["record"], requester, body["invite"], ticket),
            {:ok, caps} <- clamp(head["record"], body["caps"], body["invite"], ticket, role) do
@@ -212,6 +214,7 @@ defmodule Junderground.Rooms do
             "exp" => expires,
             "epoch" => Admission.epoch(handle),
             "role" => role,
+            "ticketed" => if(ticketed, do: "yes", else: "no"),
             "jti" => random_id()
           }
           |> maybe_rental(rental)
@@ -222,6 +225,7 @@ defmodule Junderground.Rooms do
            "room" => payload["room"],
            "subject" => requester.handle,
            "role" => role,
+           "ticketed" => ticketed,
            "caps" => caps,
            "expires" => expires,
            "ice_servers" => Turn.credentials(requester.handle, max(expires - now, 0))
@@ -613,11 +617,23 @@ defmodule Junderground.Rooms do
   def verify_grant_token(token) do
     with {:ok, payload} <- Token.verify(token, ServerKey.public_b64()) do
       cond do
-        Token.expired?(payload) -> {:error, :expired}
-        revoked_now?(payload["jti"]) -> {:error, :revoked}
-        stale_epoch?(payload) -> {:error, :revoked}
-        suspended_subject?(payload["sub"]) -> {:error, :revoked}
-        true -> {:ok, payload}
+        Token.expired?(payload) ->
+          {:error, :expired}
+
+        revoked_now?(payload["jti"]) ->
+          {:error, :revoked}
+
+        stale_epoch?(payload) ->
+          {:error, :revoked}
+
+        suspended_subject?(payload["sub"]) ->
+          {:error, :revoked}
+
+        true ->
+          case door_allows?(payload) do
+            :ok -> {:ok, payload}
+            error -> error
+          end
       end
     end
   end
@@ -654,6 +670,54 @@ defmodule Junderground.Rooms do
       |> hd()
 
     Admission.epoch(owner) != (payload["epoch"] || 0)
+  end
+
+  # The last minute before a rental starts, and the whole rental, are closed to
+  # people without a ticket or a resident pass. This is what makes an older
+  # open-room grant stop working when the doors close.
+  defp door_allows?(payload) do
+    [owner, room | _] = String.split(to_string(payload["room"]), "/", parts: 2)
+
+    ticketed =
+      payload["ticketed"] == "yes" or payload["kind"] == "ticket" or
+        is_binary(payload["rental"]) or payload["role"] in ["citizen", "resident"]
+
+    case Rentals.current(owner, room) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, rental} ->
+        now = System.system_time(:second)
+
+        cond do
+          ticketed -> :ok
+          now >= rental["start"] - 60 -> {:error, :door_closed}
+          true -> :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp door_policy(handle, room, ticketed) do
+    case Rentals.current(handle, room) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, rental} ->
+        now = System.system_time(:second)
+
+        cond do
+          ticketed -> :ok
+          now >= rental["start"] -> {:error, :not_open}
+          now >= rental["start"] - 60 -> {:error, :door_closed}
+          true -> :ok
+        end
+
+      _ ->
+        :ok
+    end
   end
 
   defp suspended_subject?(sub) when is_binary(sub) do
@@ -767,14 +831,14 @@ defmodule Junderground.Rooms do
   defp ticket_role_match(_payload, _stored), do: {:error, :bad_ticket}
 
   defp ticket_rental_window(%{"rental" => id} = payload, record) when is_binary(id) do
-    case Rentals.active(record["handle"], record["room"]) do
+    case Rentals.current(record["handle"], record["room"]) do
       {:ok, %{"id" => ^id} = rental} ->
         now = System.system_time(:second)
 
         {from, until} =
           if payload["role"] == "guest",
             do: {rental["guest_start"], rental["guest_end"]},
-            else: {rental["start"], rental["end"]}
+            else: {rental["start"] - 300, rental["end"]}
 
         if from <= now and now < until, do: :ok, else: {:error, :not_open}
 

@@ -509,6 +509,13 @@ defmodule Junderground.Router do
     end
   end
 
+  get "/v1/rooms/:handle/:room/door" do
+    case Rooms.latest(handle, room) do
+      {:ok, _head} -> json(conn, 200, Rentals.door(handle, room))
+      {:error, _} -> fail(conn, :not_found)
+    end
+  end
+
   post "/v1/rooms/:handle/:room/presence" do
     case read_json(conn) do
       {:ok, conn, raw, body} ->
@@ -516,20 +523,25 @@ defmodule Junderground.Router do
              {:ok, payload} <- Rooms.verify_grant(body["grant"]),
              :ok <- grant_room(payload, handle, room),
              :ok <- grant_subject(payload, requester),
+             door = Rentals.door(handle, room),
+             ticketed = ticketed?(payload),
+             {notify_at, evict_at} = presence_times(ticketed, door),
              {:ok, entry, roster} <-
                Presence.join(
                  handle <> "/" <> room,
                  requester.handle,
                  payload["caps"] || [],
                  payload["jti"],
-                 body["ttl"]
+                 body["ttl"],
+                 %{"ticketed" => ticketed, "notify_at" => notify_at, "evict_at" => evict_at}
                ) do
           json(conn, 200, %{
             "presence_id" => entry["id"],
             "expires" => entry["expires"],
             "room" => handle <> "/" <> room,
             "roster" => roster,
-            "count" => length(roster)
+            "count" => length(roster),
+            "door" => door
           })
         else
           {:error, reason} -> fail(conn, reason)
@@ -566,11 +578,20 @@ defmodule Junderground.Router do
 
         if open? do
           {:ok, roster} = Presence.roster(handle <> "/" <> room)
+          door = Rentals.door(handle, room)
+
+          # At the rental start the non-ticketed are out, even if their entry was
+          # created before the rental existed.
+          roster =
+            if door["state"] == "in_window",
+              do: Enum.reject(roster, &(&1["ticketed"] == false)),
+              else: roster
 
           json(conn, 200, %{
             "room" => handle <> "/" <> room,
             "roster" => roster,
-            "count" => length(roster)
+            "count" => length(roster),
+            "door" => door
           })
         else
           fail(conn, :forbidden)
@@ -830,6 +851,14 @@ defmodule Junderground.Router do
 
   defp rental_room(_record, _room), do: {:error, :bad_room}
 
+  defp presence_times(true, _door), do: {0, 0}
+  defp presence_times(false, door), do: {door["notify_at"] || 0, door["starts_at"] || 0}
+
+  defp ticketed?(payload) do
+    payload["ticketed"] == "yes" or payload["kind"] == "ticket" or
+      is_binary(payload["rental"]) or payload["role"] in ["citizen", "resident"]
+  end
+
   defp grant_room(%{"room" => value}, handle, room) do
     if value == handle <> "/" <> room, do: :ok, else: {:error, :wrong_room}
   end
@@ -904,6 +933,7 @@ defmodule Junderground.Router do
   defp status_for(:wrong_room), do: 403
   defp status_for(:bad_grant), do: 422
   defp status_for(:not_open), do: 409
+  defp status_for(:door_closed), do: 403
   defp status_for(:overlap), do: 409
   defp status_for(:outside_rental), do: 409
   defp status_for(:bad_window), do: 422

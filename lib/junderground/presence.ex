@@ -17,8 +17,8 @@ defmodule Junderground.Presence do
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
-  def join(room, subject, caps, jti, ttl \\ @default_ttl) do
-    GenServer.call(__MODULE__, {:join, room, subject, caps, jti, ttl})
+  def join(room, subject, caps, jti, ttl \\ @default_ttl, opts \\ %{}) do
+    GenServer.call(__MODULE__, {:join, room, subject, caps, jti, ttl, opts})
   end
 
   def leave(room, presence_id, subject \\ nil) do
@@ -31,7 +31,7 @@ defmodule Junderground.Presence do
   def init(state), do: {:ok, state}
 
   @impl true
-  def handle_call({:join, room, subject, caps, jti, ttl}, _from, state) do
+  def handle_call({:join, room, subject, caps, jti, ttl, opts}, _from, state) do
     now = System.system_time(:second)
     state = prune(state, now)
     id = presence_id(room, subject, jti)
@@ -43,7 +43,10 @@ defmodule Junderground.Presence do
       "caps" => caps,
       "joined" => now,
       "expires" => now + ttl,
-      "jti" => jti
+      "jti" => jti,
+      "ticketed" => opts["ticketed"] == true,
+      "notify_at" => integer(opts["notify_at"]),
+      "evict_at" => integer(opts["evict_at"])
     }
 
     room_state = Map.get(state, room, %{})
@@ -82,18 +85,31 @@ defmodule Junderground.Presence do
         "subject" => entry["subject"],
         "caps" => entry["caps"],
         "joined" => entry["joined"],
-        "expires" => entry["expires"]
+        "expires" => entry["expires"],
+        "ticketed" => entry["ticketed"],
+        "notify_at" => entry["notify_at"],
+        "evict_at" => entry["evict_at"]
       }
     end)
     |> Enum.sort_by(& &1["joined"])
   end
 
+  # An entry whose eviction time has passed is gone: a non-ticketed person is
+  # out when the rental starts.
   defp prune(state, now) do
     Map.new(state, fn {room, entries} ->
-      live = Map.reject(entries, fn {_id, entry} -> entry["expires"] <= now end)
+      live =
+        Map.reject(entries, fn {_id, entry} ->
+          entry["expires"] <= now or
+            (entry["evict_at"] > 0 and entry["evict_at"] <= now)
+        end)
+
       {room, live}
     end)
   end
+
+  defp integer(value) when is_integer(value), do: value
+  defp integer(_value), do: 0
 
   defp presence_id(room, subject, jti) do
     :crypto.hash(:sha256, Enum.join([room, subject, jti], <<0x1F>>))

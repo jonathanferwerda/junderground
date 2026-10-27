@@ -1,24 +1,19 @@
 # junderground checkpoint
 
-## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 23:10 UTC
+## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 23:30 UTC
 
-Goal: v0.1.4 — citizen/resident/guest room roles, resident passes, guest
-windows, rental fee quote and renter price, public feed for chaining.
+Goal: v0.1.5 — rental door policy, then the jawnos ticket→pass rename.
 
 Done:
-- `rooms.ex`: role resolution (citizen/resident/guest), role caps, resident
-  passes (`/passes`), tickets carry `role`, `grants`, `warranty`, guest-window
-  clamping.
-- `rentals.ex`: `guest_start`/`guest_end`, `citizen`, `fee`, `guest_price`,
-  `Rentals.quote/2`, role-aware `open_for/4`.
-- `router.ex`: `/v1/rental_quote`, `/v1/rooms/:h/:r/passes`, `/v1/feed`.
-- Config: `rent_base_fee`, `rent_currency`, `rent_block_seconds`,
-  `rent_rate_percent`.
-- Docs: roles, fees, guest windows, the ticket/pass naming rule, feed chaining.
-- 80 tests pass.
+- `rentals.ex`: `door/2` (reserved / notice / closing / in_window), setup window
+  of 5 minutes for citizen and residents.
+- `rooms.ex`: `ticketed`, door policy in `grant`, `door_closed` in
+  `verify_grant_token`.
+- `presence.ex`: `ticketed`, `notify_at`, `evict_at`; eviction on read.
+- `router.ex`: `/v1/rooms/:h/:r/door`; presence carries the door.
+- 83 tests pass.
 
 Next:
-1. Commit v0.1.4 (this file goes with it).
-2. Signaling channel + SFU adapter.
-3. jawnos client: partial dial, role-aware join, roster grading, store tickets.
-4. Chat app Underground section and rental editor.
+1. Commit v0.1.5.
+2. jawnos ticket→pass rename (subagent patch in a clean worktree).
+3. Signaling + client.

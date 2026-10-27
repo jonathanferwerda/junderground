@@ -61,6 +61,15 @@ defmodule Junderground.Rentals do
   def next(handle, room), do: GenServer.call(__MODULE__, {:next, handle, room})
   def current(handle, room), do: GenServer.call(__MODULE__, {:current, handle, room})
 
+  @doc """
+  The door for the next or active rental.
+
+  `reserved` — a rental is ahead; `notice` — inside five minutes, tell the
+  people without a ticket; `closing` — the last minute, no new non-ticketed
+  join; `in_window` — the rental is on; `open` — nothing scheduled.
+  """
+  def door(handle, room), do: GenServer.call(__MODULE__, {:door, handle, room})
+
   @doc "Owner nil when the room has no rentals; the active one; or `:owner`."
   def open_for(handle, room, requester, role \\ "guest") do
     GenServer.call(__MODULE__, {:open_for, handle, room, requester, role})
@@ -164,6 +173,12 @@ defmodule Junderground.Rentals do
   def handle_call({:next, handle, room}, _from, state) do
     now = System.system_time(:second)
     {:reply, {:ok, maybe_view(next_rental(handle, room, now))}, state}
+  end
+
+  def handle_call({:door, handle, room}, _from, state) do
+    now = System.system_time(:second)
+    rental = active_rental(handle, room, now) || next_rental(handle, room, now)
+    {:reply, door_view(rental, now), state}
   end
 
   def handle_call({:current, handle, room}, _from, state) do
@@ -366,10 +381,39 @@ defmodule Junderground.Rentals do
       {from, until} =
         if role == "guest",
           do: {record["guest_start"], record["guest_end"]},
-          else: {record["start"], record["end"]}
+          else: {record["start"] - 300, record["end"]}
 
       from <= now and now < until
     end)
+  end
+
+  defp door_view(nil, _now), do: %{"state" => "open"}
+
+  defp door_view(rental, now) do
+    record = rental["record"]
+    start_at = record["start"]
+    end_at = record["end"]
+
+    state =
+      cond do
+        now < start_at - 300 -> "reserved"
+        now < start_at - 60 -> "notice"
+        now < start_at -> "closing"
+        now < end_at -> "in_window"
+        true -> "open"
+      end
+
+    %{
+      "state" => state,
+      "id" => rental["id"],
+      "start" => start_at,
+      "end" => end_at,
+      "guest_start" => record["guest_start"],
+      "guest_end" => record["guest_end"],
+      "notify_at" => start_at - 300,
+      "door_closed_at" => start_at - 60,
+      "starts_at" => start_at
+    }
   end
 
   defp maybe_view(nil), do: nil

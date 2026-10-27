@@ -175,6 +175,14 @@ specificity (the default is 100% for one defined construct, 50% for two, 25%
 for three). The **guest price** is the renter's own, recorded as data; the store
 charges it.
 
+### The door
+
+The room header polls `/v1/rooms/:handle/:room/door`. At `notice` every roster
+entry with `ticketed: false` gets the five-minute warning; at `starts_at` the
+client disconnects them — the switch has already dropped their presence entry
+and their grant. Residents and the citizen may set up during the last five
+minutes. The last minute admits no new non-ticketed join at all.
+
 ### Roles
 
 The room uses the same three roles:

@@ -3,9 +3,9 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*. **v0.1.4 adds the citizen/resident/guest
-role shape to rooms, guest windows, the rental fee quote, resident passes, and
-the public feed a chain of jundergrounds can re-serve.**
+today unless it is marked *planned*. **v0.1.5 adds the rental door: a five-minute
+notice, a one-minute close, and eviction of non-ticketed occupants at the
+start.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -400,6 +400,27 @@ POST /v1/rooms/alpha/lobby/rentals
   clamped to `end`, and the grant carries `rental`.
 - A ticket minted for an upcoming rental is clamped to that window too, so a
   concert ticket cannot outlive the show.
+
+**The door.** `GET /v1/rooms/:handle/:room/door` reports `reserved`, `notice`
+(within five minutes of the start), `closing` (the last minute), `in_window`, or
+`open`:
+
+```json
+{"state": "notice", "start": 1798168800, "end": 1798183200,
+ "notify_at": 1798168500, "door_closed_at": 1798168740, "starts_at": 1798168800}
+```
+
+- Five minutes before the start, everyone in the room without a ticket or a
+  resident pass is told the room is reserved.
+- In the last minute, no new non-ticketed join: `Rooms.grant` answers
+  `403 door_closed`.
+- At the start, non-ticketed presence entries are evicted, and a grant issued
+  earlier stops verifying (`door_closed`).
+- The citizen and residents may set up during those five minutes.
+
+Presence entries carry `ticketed`, `notify_at` and `evict_at`; the roster drops
+an entry at its eviction time. There is no push channel yet, so a client polls
+`/door` or the roster; the switch enforces the door either way.
 
 The two prices are recorded as data, never charged here:
 
@@ -844,6 +865,7 @@ The agent's own record of a review, separate from a status change:
 | `bad_window` / `window_too_long` | 422 | malformed or over-long rental |
 | `overlap` | 409 | the rental window intersects another |
 | `not_open` | 409 | outside a rental or guest window |
+| `door_closed` | 403 | the last minute before a rental, or the rental is on |
 | `bad_guest_window` | 422 | the guest window is not inside the rental |
 | `bad_role` / `bad_grants` / `bad_warranty` | 422 | malformed pass or ticket |
 | `bad_scope` / `bad_citizen` / `bad_fee` / `bad_currency` | 422 | malformed rental or quote |

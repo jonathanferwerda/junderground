@@ -28,4 +28,24 @@ defmodule Junderground.PresenceTest do
     Process.sleep(1_100)
     assert {:ok, []} = Presence.roster("alpha/lobby")
   end
+
+  test "a non-ticketed entry is evicted; a ticketed one stays" do
+    now = System.system_time(:second)
+
+    {:ok, _a, _} =
+      Presence.join("alpha/lobby", "alpha", ["join"], "jti-evict", 60, %{
+        "ticketed" => false,
+        "notify_at" => now + 1,
+        "evict_at" => now + 1
+      })
+
+    {:ok, _b, _} =
+      Presence.join("alpha/lobby", "beta", ["join"], "jti-stay", 60, %{"ticketed" => true})
+
+    Process.sleep(1_100)
+    {:ok, roster} = Presence.roster("alpha/lobby")
+
+    assert Enum.map(roster, & &1["subject"]) == ["beta"]
+    assert hd(roster)["ticketed"] == true
+  end
 end
