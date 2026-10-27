@@ -8,14 +8,14 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.2** — the directory, the record chain, administrator approval
-> and probation, crest-bound identity, construct dials, peer onboarding for
-> other jundergrounds, presence and house-side relationship grading, tickets
-> and private rooms, room records, grants, revocations, TURN credentials and the
-> HTTP API are implemented and tested (66 tests). The media plane (signaling,
-> SFU, coturn deployment) is designed but not built. See `docs/API.md` for the
-> contract, `docs/CHAT-ADMIN.md` for the administrator's screen, and the
-> boundary below.
+> Status: **v0.1.3** — the directory, the record chain, administrator approval
+> and probation, crest-bound identity, partial construct dials, peer onboarding
+> for other jundergrounds, presence and house-side relationship grading, room
+> tickets (bound and bearer), room rentals and event windows, private rooms,
+> grants, revocations, TURN credentials and the HTTP API are implemented and
+> tested (73 tests). The media plane (signaling, SFU, coturn deployment) is
+> designed but not built. See `docs/API.md` for the contract,
+> `docs/CHAT-ADMIN.md` for the administrator's screen, and the boundary below.
 
 ## Why it exists
 
@@ -46,9 +46,20 @@ may mirror records in, and probation is read-only.
 house grades it against its own people list and blacklist and decides whether to
 flag the room before opening. The switch never receives the graph.
 
-**Tickets are bound capabilities.** A room ticket names one person, has a use
-count and is spent server-side; a private conversation is a `direct` room and a
-visit to a house is a ticket-bound room.
+**A dial is partial.** A construct that is not named is a wildcard, not a
+default: `event=christmas` alone is the universal Christmas room, while a
+three-construct dial names one show. A room matches when its scope sits inside
+the viewer's dial.
+
+**Tickets are bound or bearer.** A private ticket names one person; an event
+ticket carries a use count and is sold in the store; a rental window decides
+when the room is open and caps every ticket at its end. A private conversation
+is a `direct` room and a visit to a house is a ticket-bound room.
+
+**Citizen tickets are not room tickets.** A citizen ticket is jawnos' delegated
+login to a relationship's manager (the parent, the POA, the fingerprint); a room
+ticket only admits someone to a room. The switch never learns who has delegated
+access to whose manager.
 
 **Rooms are dialled by social construct.** The eleven kinds and defaults are
 copied from jawnos `gb.pl`, and the channel id is the same tuple the Mail app
@@ -91,7 +102,8 @@ The switch generates its Ed25519 identity on first boot at
 | Administrator approval, probation, suspension, audit log | done |
 | Peer onboarding for other jundergrounds | done |
 | Presence roster and house-side relationship grading | done |
-| Room tickets, direct/private rooms, ticket-bound visits | done |
+| Room tickets (bound and bearer), direct/private rooms | done |
+| Room rentals, event windows, tickets clamped to a window | done |
 | Agent review endpoint and instant suspension (epoch) | done |
 | Abuse reports and the admin/agent queue | done |
 | Crest binding (crest key = signing key) | done |
@@ -110,7 +122,8 @@ lib/junderground/
   keys.ex        Ed25519 over canonical JSON
   record.ex      house record schema and chain rules
   directory.ex   append-only DETS store, feed and mirroring
-  rooms.ex       room records, construct dials, grants, revocation
+  rooms.ex       room records, construct dials, grants, tickets, revocation
+  rentals.ex     signed time windows and the event schedule
   constructs.ex  the eleven social constructs and the channel tuple
   admission.ex   pending / approved / probation / suspended / rejected / banned
   peers.ex       other jundergrounds, peer-signed mirror requests
@@ -146,3 +159,4 @@ The signed bytes are the same convention jawnos already uses for crests
 5. The jawnos client: verify a record, dial by construct, grade the roster,
    join a room, and let the call bot be a room participant.
 6. The Chat app's Underground section, per `docs/CHAT-ADMIN.md`.
+7. The jawnos dial must adopt the partial-scope rule in `Constructs`.

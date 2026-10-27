@@ -51,6 +51,17 @@ cowlib's current release carries an open advisory).
   under, so a suspension is instant; do not weaken that to a timestamp compare.
 - **Peers use their own record format** (`junderground-peer`) and their own
   signature header (`X-JG-Peer`). A peer is not a house and has no handle.
+- **A blank construct is a wildcard.** `Constructs.normalize` must keep only
+  defined values; do not reintroduce defaults into a room's scope. Room
+  matching is `room_scope ⊆ dial`.
+- **Rentals gate the room.** A room with windows is closed outside them; every
+  grant and ticket is clamped to the active window's `end`. Do not let a ticket
+  outlive its rental.
+- **Bound vs bearer is a security boundary.** A bound ticket must be spent by
+  its subject; a bearer ticket is transferable by design (the store sold it).
+  Do not silently turn one into the other.
+- **A citizen ticket is never stored here.** It is jawnos' delegated login, not
+  a room admission; the switch only knows a room ticket and its subject.
 
 ## Boundary
 

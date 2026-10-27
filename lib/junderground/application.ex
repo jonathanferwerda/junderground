@@ -10,6 +10,7 @@ defmodule Junderground.Application do
           Junderground.Nonces,
           {Junderground.Admission, []},
           {Junderground.Directory, []},
+          {Junderground.Rentals, []},
           {Junderground.Rooms, []},
           {Junderground.Peers, []},
           Junderground.Presence,

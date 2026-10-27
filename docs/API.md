@@ -3,9 +3,9 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*. **v0.1.2 adds peers (other jundergrounds
-through the same admission flow), presence and house-side relationship grading,
-tickets and private rooms, and an agent review endpoint.**
+today unless it is marked *planned*. **v0.1.3 makes a dial partial (a blank
+construct is a wildcard), adds rentals and event tickets, and separates a
+citizen ticket from a room ticket.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -223,46 +223,53 @@ own switch.
 
 ## 4b. Constructs and the dial
 
-A room is tuned by a **dial**, exactly as in the Mail app: one value per social
-construct. The eleven kinds and their defaults are copied from `gb.pl`'s
-`%social_constructs`:
+A room is tuned by a **dial**, but a dial is **partial**. The eleven kinds are
+the ones `gb.pl` defines; a kind that is not named is *undefined*, not "the
+default".
 
-| Kind | Default | Kind | Default |
-| --- | --- | --- | --- |
-| communities | local | governments | civic |
-| clubs | peers | corporations | sole |
-| teams | family | places | home |
-| people | self | vendors | market |
-| projects | life | events | now |
-| institutions | house | | |
+| Kind | Kind |
+| --- | --- |
+| communities | governments |
+| clubs | corporations |
+| teams | places |
+| people | vendors |
+| projects | events |
+| institutions | |
 
-A dial that omits a kind takes its default. The channel is:
+So:
 
 ```
-channel    = values in sorted kind order, joined by the byte 0x1f
-channel_id = SHA-256 hex of that string
+{events: christmas}                          → the universal Christmas room
+{communities: warwick, events: rock_show, teams: the_greatest_band}
+                                             → only that show
+{}                                           → a house lobby, open to any dial
 ```
 
-That is byte-identical to `mail_channel_key()` in jawnos, so the same tuple
-names the same room on both sides. A room's head carries its `constructs`,
-`channel` and `advertised` flag; the signed record carries `constructs` and
-`advertised`.
+**Matching is a subset:** a room matches a viewer when every construct the room
+defines is present in the viewer's dial with the same value. The viewer may have
+more; a narrower viewer does not reach a wider room.
 
-`GET /v1/constructs` returns the kinds and defaults for the dial UI.
+```
+scope_id = SHA-256 hex over "jg-scope-v1" NUL and the sorted "kind=value" pairs
+```
 
-`GET /v1/dial?communities=harbour&clubs=chess` returns every advertised room of
-an admitted house on that channel:
+`GET /v1/constructs` returns the kinds and the *suggested* values for a dial UI.
+They are suggestions; they are never applied to a room.
+
+`GET /v1/dial?events=christmas&communities=warwick` returns every advertised
+room of an admitted house whose scope sits inside that dial:
 
 ```json
 {
-  "channel": "…64 hex…",
-  "constructs": {"communities": "harbour", "clubs": "chess", "…": "…"},
-  "rooms": [room_meta, …]
+  "dial": {"events": "christmas", "communities": "warwick"},
+  "rooms": [{"constructs": {"events": "christmas"}, "scope": "…64 hex…", …}]
 }
 ```
 
 A room that is not `advertised` is reachable by its owner and by handle, but
-does not appear on the dial.
+does not appear on the dial. The Mail app's `mail_channel_key` fills missing
+constructs with defaults and therefore names different rooms; jawnos' dial must
+adopt this partial-scope rule for the two sides to agree.
 
 ## 4c. Presence and relationship grading
 
@@ -308,28 +315,87 @@ A room's `policy` says how someone is admitted:
 | `house` | only the owning house |
 | `invite` | an invite grant from the owner, or a ticket |
 | `direct` | a handle in the room's `members` list |
-| `ticket` | a ticket bound to the requester |
+| `ticket` | a ticket for this room |
 
-A **ticket** is a grant with `kind: "ticket"`, bound to one subject, with a use
-count. The owner mints it for a person — a spouse, a parent, a guest:
+A **ticket** is a grant with `kind: "ticket"`. It is either **bound** to one
+subject or **bearer**, and it has a use count:
 
 ```json
 POST /v1/rooms/alpha/lobby/tickets
-{"sub": "beta", "caps": ["join", "publish_audio"], "uses": 1, "expires": 1760600000}
+{"sub": "beta", "bind": "subject", "caps": ["join", "publish_audio"],
+ "uses": 1, "expires": 1760600000,
+ "meta": {"sku": "rock-2026-12-23", "seat": "GA"}}
 
-→ {"ticket": "JG1…", "jti": "…", "subject": "beta",
+→ {"ticket": "JG1…", "jti": "…", "subject": "beta", "bind": "subject",
    "caps": ["join", "publish_audio"], "expires": 1760600000, "uses": 1}
 ```
 
+- `bind: "subject"` (the default when `sub` is present) — only that person may
+  spend it. This is the private invitation, the spouse, the parent.
+- `bind: "bearer"` (the default when `sub` is absent) — anyone admitted may
+  spend it, once per use. This is the concert ticket sold in the store.
+- `meta` is opaque strings for the seller: sku, seat, event. The switch does not
+  interpret it and never sees a price.
+
 The ticket is stored server-side (uses, expiry, revoker) and is spent one use at
-a time by `POST …/token` with `{"ticket": "JG1…"}`. Only the named subject can
-spend it; a spent, expired or revoked ticket is refused. `GET …/tickets` (owner
-only) lists what is outstanding.
+a time by `POST …/token` with `{"ticket": "JG1…"}`. A spent, expired, revoked or
+wrong-subject ticket is refused. `GET …/tickets` (owner only) lists what is
+outstanding.
 
 A `direct` room is how a private conversation is named: two members, each
 admitted by membership. A house visit is the same idea with `policy: "ticket"`
 (or `direct`) and a ticket for the visitor — there is no separate "visit"
 endpoint, because a visit is just a room with a small door.
+
+## 4e. Rentals and event tickets
+
+A house can reserve its own room for a window — a rock show on 23 December,
+18:00–22:00 — with a signed rental record:
+
+```json
+POST /v1/rooms/alpha/lobby/rentals
+{
+  "format": "junderground-rental", "version": 1,
+  "handle": "alpha", "room": "lobby",
+  "start": 1798168800, "end": 1798183200,
+  "label": "The Greatest Band", "event": "rock_show",
+  "sku": "rock-2026-12-23", "capacity": 120,
+  "seq": 1, "issued": 1760000000,
+  "pubkey": "…", "sig": "…"
+}
+```
+
+- Windows must be positive and at most 12 hours; rentals for one room may not
+  overlap.
+- A room with rentals is **closed outside them**. The owner may enter to set up;
+  everyone else needs the active window.
+- `GET …/rentals` lists the schedule, `GET …/rentals/active` is the current
+  window (or `409 not_open`), `POST …/rentals/:id/cancel` frees it.
+- Grants and tickets minted while a rental is active end with it: `exp` is
+  clamped to `end`, and the grant carries `rental`.
+- A ticket minted for an upcoming rental is clamped to that window too, so a
+  concert ticket cannot outlive the show.
+
+**The store and the studio are jawnos'.** junderground never sees a price, a
+payment, or a SKU list; it sees a window, a capacity and a label. Selling the
+ticket, broadcasting the set and the chat around it happen in jawnos; the switch
+answers "may this ticket enter this room, and until when?".
+
+## 4f. Citizen tickets are not room tickets
+
+A **citizen ticket** is jawnos' answer to "may this person log in to a
+relationship's manager?" — a delegated login pass authorized by the person, for
+example a parent's power of attorney checking an elderly parent's status after
+that parent confirms with a fingerprint. It is a jawnos identity record and
+carries no room.
+
+A **room ticket** is this switch's answer to "may this person enter this room,
+how many times, and until when?". It carries no login.
+
+The two are deliberately separate. A person may hold both; junderground never
+needs to learn who has delegated access to whose manager. If an event buyer is
+not a house handle yet, the store can hand them a bearer room ticket and keep
+the citizen ticket on the jawnos side.
 
 ## 5. Signed requests
 
@@ -378,7 +444,7 @@ All responses are JSON. Errors are `{"error":{"code":"…"}}`.
   "houses": 12,
   "max_skew": 300,
   "features": ["signed-records", "room-grants", "turn-credentials", "admission",
-               "crest", "constructs", "peers", "presence", "tickets"],
+               "crest", "constructs", "peers", "presence", "tickets", "rentals"],
   "peers": 3,
   "admission": {"requires_approval": true, "statuses": ["pending", "approved", "probation", "suspended", "rejected", "banned"], "admins": 1},
   "constructs": {"communities": "local", "clubs": "peers", "…": "…"},
@@ -707,7 +773,10 @@ The agent's own record of a review, separate from a status change:
 | `ticket_spent` | 409 | the ticket has no uses left |
 | `ticket_not_found` | 404 | the ticket is not one this switch issued |
 | `wrong_room` | 403 | a grant/ticket presented for another room |
-| `bad_verdict` / `bad_cap` / `bad_subject` | 422 | malformed review or ticket |
+| `bad_verdict` / `bad_cap` / `bad_subject` / `bad_bind` / `bad_meta` | 422 | malformed review or ticket |
+| `bad_window` / `window_too_long` | 422 | malformed or over-long rental |
+| `overlap` | 409 | the rental window intersects another |
+| `not_open` | 409 | outside a rental window, or a rental already ended |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation

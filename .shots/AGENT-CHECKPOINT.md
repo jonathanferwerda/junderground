@@ -1,23 +1,24 @@
 # junderground checkpoint
 
-## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 22:45 UTC
+## Agent: DeepSeek V4.1 Flash (Zed) — 2026-10-26 23:00 UTC
 
-Goal: v0.1.2 — peer onboarding, instant suspension, presence + relationship
-grading, tickets and private rooms, agent review API.
+Goal: v0.1.3 — partial dial scopes, room rentals and event windows, bearer
+event tickets, and the citizen-ticket boundary.
 
-Done (all committed unless this file says otherwise):
-- `peers.ex`, `presence.ex`, `relationships.ex` added.
-- `admission.ex`: `revoked_before`, `epoch` (bumped on every stop), `review/5`,
-  `reviews/2`; `watch`→probation, `suspend`→suspended, `ban`→banned.
-- `rooms.ex`: policies `direct`/`ticket`, `members`, ticket issue/list/consume,
-  epoch-aware grant verification.
-- `router.ex`: `/v1/peers`, `/v1/peers/:id`, admin peers/queue/audit, presence
-  join/leave/roster, tickets, reviews; `/v1/mirror` now needs an approved peer.
-- `docs/CHAT-ADMIN.md` is the chat-app UI contract; `docs/API.md` covers every
-  endpoint; 66 tests pass.
+Done:
+- `constructs.ex` rewritten: blank constructs are undefined (wildcards), rooms
+  match by `room_scope ⊆ dial`, `scope_id`, suggestions only for the UI.
+- `rentals.ex`: signed windows (≤ 12h, no overlap), active/next, `open_for`,
+  cancel; rooms closed outside their windows; grants and tickets clamped to the
+  window end.
+- `rooms.ex`: `dial/1`, `scope`, ticket `bind` (subject/bearer), `meta`, rental
+  claim, rental-aware verification.
+- `router.ex`: rentals endpoints, new dial response, ticket fields.
+- Docs: partial dial, rentals, citizen-vs-room ticket boundary.
+- 73 tests pass.
 
 Next:
-1. Commit v0.1.2 (this file goes with it).
-2. Signaling channel (WebSocket, grant-in / SDP+ICE out) and SFU adapter.
-3. jawnos client: verify record, dial by construct, grade roster, join.
-4. Chat app Underground section per `docs/CHAT-ADMIN.md`.
+1. Commit v0.1.3 (this file goes with it).
+2. Signaling channel + SFU adapter.
+3. jawnos client: partial dial, roster grading, join, event ticket purchase.
+4. Chat app Underground section and the rental editor.

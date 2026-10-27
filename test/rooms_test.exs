@@ -1,7 +1,7 @@
 defmodule Junderground.RoomsTest do
   use ExUnit.Case, async: false
 
-  alias Junderground.{Admission, Directory, Keys, Record, Rooms, ServerKey, Token, Turn}
+  alias Junderground.{Admission, Directory, Keys, Record, Rentals, Rooms, ServerKey, Token, Turn}
 
   setup do
     dir = Path.join(System.tmp_dir!(), "jg-rooms-#{System.unique_integer([:positive])}")
@@ -11,6 +11,7 @@ defmodule Junderground.RoomsTest do
 
     start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
+    start_supervised!({Junderground.Rentals, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 
     on_exit(fn ->
@@ -148,22 +149,40 @@ defmodule Junderground.RoomsTest do
     assert server["credential"] == expected
   end
 
-  test "a room is found by the dial tuple the Mail app uses", %{pub: pub, priv: priv} do
-    dial = %{"communities" => "harbour", "clubs" => "chess", "projects" => "radio"}
+  test "a room is found by its scope inside the dial", %{pub: pub, priv: priv} do
+    scope = %{"communities" => "warwick", "events" => "rock_show", "teams" => "the_greatest_band"}
 
     assert {:ok, _} =
              Rooms.register(
-               room(pub, priv, %{"policy" => "open", "advertised" => "yes", "constructs" => dial})
+               room(pub, priv, %{"policy" => "open", "advertised" => "yes", "constructs" => scope})
              )
 
-    assert {:ok, heads} = Rooms.by_channel(Junderground.Constructs.channel_id(dial))
-    assert [head] = heads
-    assert head["constructs"]["communities"] == "harbour"
-    assert head["advertised"] == true
+    assert {:ok, heads} =
+             Rooms.dial(%{
+               "communities" => "warwick",
+               "events" => "rock_show",
+               "teams" => "the_greatest_band",
+               "clubs" => "chess"
+             })
 
-    # a different dial names a different room
-    assert {:ok, []} =
-             Rooms.by_channel(Junderground.Constructs.channel_id(%{"communities" => "elsewhere"}))
+    assert [head] = heads
+    assert head["constructs"]["events"] == "rock_show"
+
+    # a narrower dial does not reach a wider room
+    assert {:ok, []} = Rooms.dial(%{"events" => "rock_show"})
+
+    # a universal room matches any dial
+    universal =
+      Rooms.build("alpha", "hall", pub, 1, %{
+        "policy" => "open",
+        "advertised" => "yes",
+        "constructs" => %{}
+      })
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rooms.register(universal)
+    assert {:ok, heads} = Rooms.dial(%{"events" => "christmas"})
+    assert Enum.map(heads, & &1["record"]["room"]) == ["hall"]
   end
 
   test "a ticket is bound to one person and is spent", %{pub: pub, priv: priv} do
@@ -221,5 +240,80 @@ defmodule Junderground.RoomsTest do
              Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
 
     assert {:ok, _} = Rooms.verify_grant(fresh["grant"])
+  end
+
+  test "a rented room is closed outside its window", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "open"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    future =
+      Rentals.build("alpha", "lobby", pub, 1, now + 3600, now + 7200)
+      |> Keys.sign_record(priv)
+
+    assert {:ok, _} = Rentals.create(future)
+
+    assert {:error, :not_open} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+
+    assert {:ok, _} = Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+
+    active =
+      Rentals.build("alpha", "lobby", pub, 2, now - 60, now + 600, %{"prev" => future["sig"]})
+      |> Keys.sign_record(priv)
+
+    assert {:ok, active_view} = Rentals.create(active)
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+
+    assert grant["expires"] <= active_view["end"]
+  end
+
+  test "an event ticket ends with its rental window", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+    now = System.system_time(:second)
+
+    rental =
+      Rentals.build("alpha", "lobby", pub, 1, now - 60, now + 600, %{"label" => "Rock Show"})
+      |> Keys.sign_record(priv)
+
+    assert {:ok, rental_view} = Rentals.create(rental)
+
+    assert {:ok, ticket} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "sub" => "beta",
+               "uses" => 1,
+               "expires" => now + 86_400
+             })
+
+    assert ticket["expires"] <= rental_view["end"]
+    assert ticket["rental"] == rental_view["id"]
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
+
+    assert grant["expires"] <= rental_view["end"]
+  end
+
+  test "a bearer ticket can be spent by anyone admitted", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+    house("gamma")
+
+    assert {:ok, ticket} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "bind" => "bearer",
+               "uses" => 1
+             })
+
+    assert ticket["bind"] == "bearer"
+
+    assert {:ok, _} =
+             Rooms.grant("alpha", "lobby", %{handle: "gamma"}, %{"ticket" => ticket["ticket"]})
+
+    assert {:error, :ticket_spent} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
   end
 end

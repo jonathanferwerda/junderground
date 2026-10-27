@@ -11,7 +11,17 @@ defmodule Junderground.Rooms do
 
   use GenServer
 
-  alias Junderground.{Admission, Canonical, Constructs, Directory, Keys, ServerKey, Token, Turn}
+  alias Junderground.{
+    Admission,
+    Canonical,
+    Constructs,
+    Directory,
+    Keys,
+    Rentals,
+    ServerKey,
+    Token,
+    Turn
+  }
 
   @table :junderground_rooms
   @format "junderground-room"
@@ -41,7 +51,7 @@ defmodule Junderground.Rooms do
         "seq" => seq,
         "issued" => System.system_time(:second),
         "name" => room,
-        "constructs" => Constructs.defaults(),
+        "constructs" => %{},
         "advertised" => "no",
         "members" => [],
         "policy" => "invite",
@@ -56,7 +66,7 @@ defmodule Junderground.Rooms do
   def register(record), do: GenServer.call(__MODULE__, {:register, record})
   def latest(handle, room), do: GenServer.call(__MODULE__, {:latest, handle, room})
   def list(handle), do: GenServer.call(__MODULE__, {:list, handle})
-  def by_channel(channel), do: GenServer.call(__MODULE__, {:by_channel, channel})
+  def dial(scope), do: GenServer.call(__MODULE__, {:dial, scope})
 
   def grant(handle, room, requester, body) when is_map(body) do
     GenServer.call(__MODULE__, {:grant, handle, room, requester, body})
@@ -131,12 +141,12 @@ defmodule Junderground.Rooms do
     {:reply, {:ok, :dets.select(@table, ms)}, state}
   end
 
-  def handle_call({:by_channel, channel}, _from, state) do
+  def handle_call({:dial, scope}, _from, state) do
     heads = :dets.select(@table, [{{{:room, :_, :_}, :"$1"}, [], [:"$1"]}])
 
     open =
       Enum.filter(heads, fn head ->
-        head["channel"] == channel and not head["tombstoned"]
+        not head["tombstoned"] and Constructs.matches?(head["constructs"], scope)
       end)
 
     {:reply, {:ok, open}, state}
@@ -149,6 +159,7 @@ defmodule Junderground.Rooms do
            {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
            :ok <- owner_admitted(head["record"]["handle"]),
+           {:ok, rental} <- Rentals.open_for(handle, room, requester.handle),
            {:ok, ticket} <- consume_ticket(head["record"], requester, body["ticket"]),
            :ok <- access(head["record"], requester, body["invite"], ticket),
            {:ok, caps} <- clamp(head["record"], requester, body["caps"], body["invite"], ticket) do
@@ -164,20 +175,23 @@ defmodule Junderground.Rooms do
 
         room_exp = head["record"]["expires"] || 0
         expires = if room_exp > 0, do: min(now + ttl, room_exp), else: now + ttl
+        expires = if is_map(rental), do: min(expires, rental["end"]), else: expires
 
-        payload = %{
-          "format" => "junderground-grant",
-          "version" => 1,
-          "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
-          "room" => handle <> "/" <> room,
-          "room_key" => head["room_key"],
-          "sub" => requester.handle,
-          "caps" => caps,
-          "iat" => now,
-          "exp" => expires,
-          "epoch" => Admission.epoch(handle),
-          "jti" => random_id()
-        }
+        payload =
+          %{
+            "format" => "junderground-grant",
+            "version" => 1,
+            "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
+            "room" => handle <> "/" <> room,
+            "room_key" => head["room_key"],
+            "sub" => requester.handle,
+            "caps" => caps,
+            "iat" => now,
+            "exp" => expires,
+            "epoch" => Admission.epoch(handle),
+            "jti" => random_id()
+          }
+          |> maybe_rental(rental)
 
         {:ok,
          %{
@@ -220,37 +234,50 @@ defmodule Junderground.Rooms do
       with {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
            :ok <- owner_only(head["record"], requester),
-           {:ok, sub} <- ticket_subject(body["sub"]),
+           {:ok, bind} <- ticket_bind(body["sub"], body["bind"]),
+           {:ok, sub} <- ticket_subject(body["sub"], bind),
            {:ok, caps} <- ticket_caps(body["caps"]),
            {:ok, uses} <- ticket_uses(body["uses"]),
-           {:ok, expires} <- ticket_expiry(body["expires"]) do
+           {:ok, meta} <- ticket_meta(body["meta"]),
+           {:ok, expires} <- ticket_expiry(body["expires"]),
+           {:ok, rental} <- rental_for_ticket(handle, room),
+           :ok <- ticket_window(expires, rental) do
         now = System.system_time(:second)
+        expires = if is_map(rental), do: min(expires, rental["end"]), else: expires
         jti = random_id()
 
-        payload = %{
-          "format" => "junderground-grant",
-          "version" => 1,
-          "kind" => "ticket",
-          "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
-          "room" => handle <> "/" <> room,
-          "room_key" => head["room_key"],
-          "sub" => sub,
-          "caps" => caps,
-          "iat" => now,
-          "exp" => expires,
-          "epoch" => Admission.epoch(handle),
-          "jti" => jti,
-          "uses" => uses
-        }
+        payload =
+          %{
+            "format" => "junderground-grant",
+            "version" => 1,
+            "kind" => "ticket",
+            "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
+            "room" => handle <> "/" <> room,
+            "room_key" => head["room_key"],
+            "bind" => bind,
+            "meta" => meta,
+            "caps" => caps,
+            "iat" => now,
+            "exp" => expires,
+            "epoch" => Admission.epoch(handle),
+            "jti" => jti,
+            "uses" => uses
+          }
+          |> maybe_sub(sub)
+          |> maybe_rental(rental)
 
-        stored = %{
-          "room" => handle <> "/" <> room,
-          "sub" => sub,
-          "caps" => caps,
-          "exp" => expires,
-          "uses_left" => uses,
-          "by" => requester.handle
-        }
+        stored =
+          %{
+            "room" => handle <> "/" <> room,
+            "bind" => bind,
+            "meta" => meta,
+            "caps" => caps,
+            "exp" => expires,
+            "uses_left" => uses,
+            "by" => requester.handle
+          }
+          |> maybe_sub(sub)
+          |> maybe_rental(rental)
 
         :dets.insert(@table, {{:ticket, jti}, stored})
 
@@ -260,10 +287,13 @@ defmodule Junderground.Rooms do
            "jti" => jti,
            "room" => payload["room"],
            "subject" => sub,
+           "bind" => bind,
+           "meta" => meta,
            "caps" => caps,
            "expires" => expires,
            "uses" => uses
-         }}
+         }
+         |> maybe_rental(rental)}
       end
 
     {:reply, reply, state}
@@ -279,6 +309,9 @@ defmodule Junderground.Rooms do
         %{
           "jti" => jti,
           "subject" => stored["sub"],
+          "bind" => stored["bind"] || "subject",
+          "meta" => stored["meta"] || %{},
+          "rental" => stored["rental"],
           "caps" => stored["caps"],
           "expires" => stored["exp"],
           "uses_left" => stored["uses_left"]
@@ -581,6 +614,14 @@ defmodule Junderground.Rooms do
 
   defp random_id, do: :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)
 
+  defp maybe_rental(payload, rental) when is_map(rental),
+    do: Map.put(payload, "rental", rental["id"])
+
+  defp maybe_rental(payload, _rental), do: payload
+
+  defp maybe_sub(payload, nil), do: payload
+  defp maybe_sub(payload, sub), do: Map.put(payload, "sub", sub)
+
   # ---- tickets -------------------------------------------------------------
 
   def issue_ticket(handle, room, requester, body) do
@@ -603,7 +644,8 @@ defmodule Junderground.Rooms do
              :ok <- ticket_for_room(payload, record),
              :ok <- ticket_for_subject(payload, requester),
              {:ok, stored} <- ticket_lookup(payload["jti"]),
-             :ok <- ticket_usable(stored, requester) do
+             :ok <- ticket_usable(stored, requester),
+             :ok <- ticket_rental_window(payload, record) do
           :dets.insert(
             @table,
             {{:ticket, payload["jti"]}, Map.put(stored, "uses_left", stored["uses_left"] - 1)}
@@ -623,6 +665,8 @@ defmodule Junderground.Rooms do
       else: {:error, :bad_ticket}
   end
 
+  defp ticket_for_subject(%{"bind" => "bearer"}, _requester), do: :ok
+
   defp ticket_for_subject(payload, requester) do
     if payload["sub"] == requester.handle, do: :ok, else: {:error, :forbidden}
   end
@@ -636,20 +680,79 @@ defmodule Junderground.Rooms do
 
   defp ticket_usable(stored, requester) do
     cond do
-      stored["sub"] != requester.handle -> {:error, :forbidden}
+      stored["bind"] == "subject" and stored["sub"] != requester.handle -> {:error, :forbidden}
       stored["uses_left"] <= 0 -> {:error, :ticket_spent}
       stored["exp"] <= System.system_time(:second) -> {:error, :expired}
       true -> :ok
     end
   end
 
-  defp ticket_subject(sub) when is_binary(sub) do
+  # A ticket minted against a rental is only good while that window is open.
+  defp ticket_rental_window(%{"rental" => id}, record) when is_binary(id) do
+    case Rentals.active(record["handle"], record["room"]) do
+      {:ok, %{"id" => ^id}} -> :ok
+      _ -> {:error, :not_open}
+    end
+  end
+
+  defp ticket_rental_window(_payload, _record), do: :ok
+
+  defp ticket_bind(nil, nil), do: {:ok, "bearer"}
+  defp ticket_bind(sub, nil) when is_binary(sub), do: {:ok, "subject"}
+  defp ticket_bind(_sub, "bearer"), do: {:ok, "bearer"}
+  defp ticket_bind(sub, "subject") when is_binary(sub), do: {:ok, "subject"}
+  defp ticket_bind(_sub, "subject"), do: {:error, :bad_subject}
+  defp ticket_bind(_sub, _bind), do: {:error, :bad_bind}
+
+  defp ticket_subject(_sub, "bearer"), do: {:ok, nil}
+  defp ticket_subject(nil, _bind), do: {:error, :bad_subject}
+
+  defp ticket_subject(sub, _bind) when is_binary(sub) do
     if byte_size(sub) > 0 and byte_size(sub) <= 64 and not String.match?(sub, ~r/[[:cntrl:]]/),
       do: {:ok, sub},
       else: {:error, :bad_subject}
   end
 
-  defp ticket_subject(_sub), do: {:error, :bad_subject}
+  defp ticket_subject(_sub, _bind), do: {:error, :bad_subject}
+
+  defp ticket_meta(nil), do: {:ok, %{}}
+
+  defp ticket_meta(meta) when is_map(meta) and map_size(meta) <= 10 do
+    if Enum.all?(meta, fn {key, value} ->
+         is_binary(key) and byte_size(key) <= 64 and is_binary(value) and byte_size(value) <= 200
+       end) do
+      {:ok, meta}
+    else
+      {:error, :bad_meta}
+    end
+  end
+
+  defp ticket_meta(_meta), do: {:error, :bad_meta}
+
+  defp rental_for_ticket(handle, room) do
+    case Rentals.active(handle, room) do
+      {:ok, rental} when is_map(rental) ->
+        {:ok, rental}
+
+      _ ->
+        case Rentals.next(handle, room) do
+          {:ok, rental} when is_map(rental) -> {:ok, rental}
+          _ -> {:ok, nil}
+        end
+    end
+  end
+
+  defp ticket_window(_expires, nil), do: :ok
+
+  defp ticket_window(expires, rental) when is_map(rental) do
+    now = System.system_time(:second)
+
+    cond do
+      rental["end"] <= now -> {:error, :not_open}
+      expires <= now -> {:error, :bad_expires}
+      true -> :ok
+    end
+  end
 
   defp ticket_caps(nil), do: {:ok, ["join", "publish_audio", "subscribe"]}
 
@@ -708,7 +811,7 @@ defmodule Junderground.Rooms do
       "tombstoned" => record["kind"] == "tombstone",
       "room_key" => Canonical.sha256_hex(sig),
       "constructs" => constructs,
-      "channel" => Constructs.channel_id(constructs),
+      "scope" => Constructs.scope_id(constructs),
       "advertised" => record["advertised"] == "yes",
       "record" => record
     }

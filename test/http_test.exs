@@ -12,6 +12,7 @@ defmodule Junderground.HttpTest do
     start_supervised!(Nonces)
     start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
+    start_supervised!({Junderground.Rentals, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 
     on_exit(fn ->
@@ -165,9 +166,11 @@ defmodule Junderground.HttpTest do
     conn = call(Plug.Test.conn(:get, "/v1/dial?communities=harbour&clubs=chess"))
     assert conn.status == 200
 
-    assert %{"channel" => channel, "rooms" => [%{"handle" => "alpha", "room" => "lobby"}]} =
-             JSON.decode!(conn.resp_body)
+    assert %{
+             "dial" => %{"communities" => "harbour"},
+             "rooms" => [%{"handle" => "alpha", "room" => "lobby", "scope" => scope}]
+           } = JSON.decode!(conn.resp_body)
 
-    assert channel == Junderground.Constructs.channel_id(dial)
+    assert scope == Junderground.Constructs.scope_id(dial)
   end
 end

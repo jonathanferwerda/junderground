@@ -6,7 +6,17 @@ defmodule Junderground.Router do
 
   use Plug.Router
 
-  alias Junderground.{Admin, Admission, Auth, Constructs, Directory, Peers, Presence, Rooms}
+  alias Junderground.{
+    Admin,
+    Admission,
+    Auth,
+    Constructs,
+    Directory,
+    Peers,
+    Presence,
+    Rentals,
+    Rooms
+  }
 
   plug(Plug.RequestId)
   plug(Plug.Logger, log: :debug)
@@ -37,7 +47,8 @@ defmodule Junderground.Router do
         "constructs",
         "peers",
         "presence",
-        "tickets"
+        "tickets",
+        "rentals"
       ],
       "peers" => peer_count(),
       "admission" => %{
@@ -45,7 +56,7 @@ defmodule Junderground.Router do
         "statuses" => Admission.statuses(),
         "admins" => Admin.count()
       },
-      "constructs" => Constructs.defaults(),
+      "constructs" => Constructs.suggestions(),
       "turn" => %{
         "urls" => Application.get_env(:junderground, :turn_urls, []),
         "ttl" => 600
@@ -54,15 +65,14 @@ defmodule Junderground.Router do
   end
 
   get "/v1/constructs" do
-    json(conn, 200, %{"kinds" => Constructs.kinds(), "defaults" => Constructs.defaults()})
+    json(conn, 200, %{"kinds" => Constructs.kinds(), "suggestions" => Constructs.suggestions()})
   end
 
   get "/v1/dial" do
     conn = Plug.Conn.fetch_query_params(conn)
     params = conn.query_params
-    {:ok, constructs} = Constructs.normalize(Map.take(params, Constructs.names()))
-    channel = params["channel"] || Constructs.channel_id(constructs)
-    {:ok, heads} = Rooms.by_channel(channel)
+    {:ok, dial} = Constructs.normalize(Map.take(params, Constructs.names()))
+    {:ok, heads} = Rooms.dial(dial)
 
     rooms =
       heads
@@ -70,7 +80,7 @@ defmodule Junderground.Router do
       |> Enum.filter(&Admission.admitted?(&1["record"]["handle"]))
       |> Enum.map(&room_meta/1)
 
-    json(conn, 200, %{"channel" => channel, "constructs" => constructs, "rooms" => rooms})
+    json(conn, 200, %{"dial" => dial, "rooms" => rooms})
   end
 
   # ---- other jundergrounds ---------------------------------------------
@@ -358,6 +368,53 @@ defmodule Junderground.Router do
 
       {:error, conn, reason} ->
         fail(conn, reason)
+    end
+  end
+
+  post "/v1/rooms/:handle/:room/rentals" do
+    case read_json(conn) do
+      {:ok, conn, raw, record} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             :ok <- same_handle(requester, handle),
+             :ok <- record_handle(record, handle),
+             :ok <- rental_room(record, room),
+             {:ok, _head} <- Rooms.latest(handle, room),
+             {:ok, rental} <- Rentals.create(record) do
+          json(conn, 201, rental)
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/rooms/:handle/:room/rentals" do
+    case Rooms.latest(handle, room) do
+      {:ok, _head} ->
+        {:ok, rentals} = Rentals.list(handle, room)
+        json(conn, 200, %{"rentals" => rentals})
+
+      {:error, _} ->
+        fail(conn, :not_found)
+    end
+  end
+
+  get "/v1/rooms/:handle/:room/rentals/active" do
+    case Rentals.active(handle, room) do
+      {:ok, nil} -> fail(conn, :not_open)
+      {:ok, rental} -> json(conn, 200, rental)
+    end
+  end
+
+  post "/v1/rooms/:handle/:room/rentals/:id/cancel" do
+    with {:ok, requester} <- Auth.verify(conn, ""),
+         :ok <- same_handle(requester, handle),
+         {:ok, rental} <- Rentals.cancel(handle, room, id) do
+      json(conn, 200, %{"ok" => true, "rental" => rental})
+    else
+      {:error, reason} -> fail(conn, reason)
     end
   end
 
@@ -666,7 +723,7 @@ defmodule Junderground.Router do
       "room" => record["room"],
       "name" => record["name"],
       "constructs" => head["constructs"],
-      "channel" => head["channel"],
+      "scope" => head["scope"],
       "advertised" => head["advertised"],
       "policy" => record["policy"],
       "max" => record["max"],
@@ -700,6 +757,12 @@ defmodule Junderground.Router do
       0
     end
   end
+
+  defp rental_room(%{"room" => value}, room) do
+    if value == room, do: :ok, else: {:error, :wrong_room}
+  end
+
+  defp rental_room(_record, _room), do: {:error, :bad_room}
 
   defp grant_room(%{"room" => value}, handle, room) do
     if value == handle <> "/" <> room, do: :ok, else: {:error, :wrong_room}
@@ -774,6 +837,19 @@ defmodule Junderground.Router do
   defp status_for(:ticket_not_found), do: 404
   defp status_for(:wrong_room), do: 403
   defp status_for(:bad_grant), do: 422
+  defp status_for(:not_open), do: 409
+  defp status_for(:overlap), do: 409
+  defp status_for(:outside_rental), do: 409
+  defp status_for(:bad_window), do: 422
+  defp status_for(:window_too_long), do: 422
+  defp status_for(:bad_label), do: 422
+  defp status_for(:bad_event), do: 422
+  defp status_for(:bad_sku), do: 422
+  defp status_for(:bad_capacity), do: 422
+  defp status_for(:bad_bind), do: 422
+  defp status_for(:bad_meta), do: 422
+  defp status_for(:bad_uses), do: 422
+  defp status_for(:bad_expires), do: 422
 
   defp status_for(reason)
        when reason in [

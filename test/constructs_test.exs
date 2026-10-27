@@ -3,35 +3,8 @@ defmodule Junderground.ConstructsTest do
 
   alias Junderground.Constructs
 
-  @sorted_values [
-    "chess",
-    "harbour",
-    "sole",
-    "now",
-    "civic",
-    "house",
-    "self",
-    "home",
-    "life",
-    "family",
-    "market"
-  ]
-  @default_values [
-    "peers",
-    "local",
-    "sole",
-    "now",
-    "civic",
-    "house",
-    "self",
-    "home",
-    "life",
-    "family",
-    "market"
-  ]
-
-  test "defaults are jawnos' social construct defaults" do
-    assert Constructs.defaults() == %{
+  test "suggestions are jawnos' social construct defaults" do
+    assert Constructs.suggestions() == %{
              "communities" => "local",
              "clubs" => "peers",
              "teams" => "family",
@@ -46,28 +19,39 @@ defmodule Junderground.ConstructsTest do
            }
   end
 
-  test "the channel is the sorted tuple the Mail dial uses" do
-    assert Constructs.channel(%{"communities" => "harbour", "clubs" => "chess"}) ==
-             Enum.join(@sorted_values, <<0x1F>>)
+  test "a blank construct is not part of the scope" do
+    assert {:ok, %{"events" => "christmas"}} =
+             Constructs.normalize(%{"events" => "christmas", "communities" => "", "clubs" => nil})
   end
 
-  test "missing kinds take their defaults" do
-    assert Constructs.channel(%{}) == Enum.join(@default_values, <<0x1F>>)
+  test "an empty dial is universal" do
+    assert {:ok, %{}} = Constructs.normalize(%{})
+    assert Constructs.matches?(%{}, %{})
+    assert Constructs.matches?(%{}, %{"events" => "christmas"})
   end
 
-  test "a different value is a different channel" do
-    refute Constructs.channel_id(%{"communities" => "a"}) ==
-             Constructs.channel_id(%{"communities" => "b"})
+  test "a room matches when its scope sits inside the dial" do
+    assert Constructs.matches?(
+             %{"events" => "christmas"},
+             %{"events" => "christmas", "communities" => "warwick"}
+           )
+
+    refute Constructs.matches?(
+             %{"events" => "christmas", "communities" => "warwick"},
+             %{"events" => "christmas"}
+           )
+
+    refute Constructs.matches?(%{"events" => "christmas"}, %{"events" => "halloween"})
+  end
+
+  test "a scope id is stable and changes with a value" do
+    a = Constructs.scope_id(%{"events" => "christmas"})
+    assert a == Constructs.scope_id(%{"events" => "christmas"})
+    refute a == Constructs.scope_id(%{"events" => "halloween"})
+    refute a == Constructs.scope_id(%{})
   end
 
   test "unknown kinds are refused" do
     assert Constructs.normalize(%{"nonsense" => "x"}) == {:error, :bad_constructs}
-  end
-
-  test "a dial fills in every kind" do
-    assert {:ok, full} = Constructs.normalize(%{"communities" => "harbour"})
-    assert map_size(full) == 11
-    assert full["communities"] == "harbour"
-    assert full["clubs"] == "peers"
   end
 end

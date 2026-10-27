@@ -102,6 +102,11 @@ Before a room opens, the client already has what it needs:
 GET /v1/rooms/:handle/:room/presence
 ```
 
+The room itself was reached with a **partial dial**: `event=christmas` alone is
+the universal Christmas room, while `community=warwick event=rock_show
+team=the_greatest_band` names one show. The sheet should show the scope, so the
+person knows which room they are about to enter.
+
 The response is a roster of handles and capabilities. The **house** — never the
 switch — compares it with its people list, Box Office blacklist and hostile
 marks, and draws the sheet:
@@ -126,32 +131,52 @@ A room that is not open or advertised shows the roster only after the client
 presents a valid grant, so a private room does not leak its guest list to
 passers-by.
 
-## Tickets
+## Tickets and rentals
 
-Owner-only. A ticket dialog takes:
+Tickets are minted by the owner and shown once as a code. The dialog has two
+modes:
 
-| Field | Default |
-| --- | --- |
-| person | the person whose room this is |
-| capabilities | join, publish_audio, subscribe |
-| uses | 1 |
-| expires | 7 days |
+| Field | Private (bound) | Event (bearer) |
+| --- | --- | --- |
+| person | required | none |
+| bind | `subject` | `bearer` |
+| uses | 1 | 1..100 |
+| expires | 7 days | clamped to the rental |
+| meta | — | sku, seat, event |
 
-The result is shown once as a code the owner can hand over; `GET …/tickets`
-lists what is outstanding (subject, caps, uses left, expiry) and Revoke sets the
-`jti` on the switch.
+A **private** ticket is for a spouse, a parent, a guest: only that person can
+spend it. An **event** ticket is a concert ticket: anyone admitted can spend one
+use, which is what "sell it in the store" means. `GET …/tickets` lists what is
+outstanding (subject, bind, meta, uses left, expiry) and Revoke kills a `jti`.
 
-Three distinctions the UI should keep:
+### Rentals
 
-- **Citizen ticket** (jawnos): may this person see the homepage and the store?
-  That is the house's own record and lives in jawnos.
-- **Room ticket** (junderground): may this person enter this room, and how many
-  times? Bound to one subject.
+Before selling tickets, the owner reserves the room:
+
+```
+Room: lobby                 Label: The Greatest Band
+Start: 2026-12-23 18:00     End: 2026-12-23 22:00
+Event: rock_show            Capacity: 120
+```
+
+The editor shows the schedule (past, active, upcoming), refuses overlaps, and
+marks the active window. While a window is active the room is open; outside it
+the room is closed to everyone but the owner. Tickets minted for the event end
+with the window, so a ticket cannot outlive the show.
+
+The storefront, the price, the payment and the broadcast belong to jawnos; the
+chat app only asks the switch for the window and the tickets.
+
+### Three tickets, three jobs
+
+- **Citizen ticket** (jawnos): "may this person log in to a relationship's
+  manager?" The parent, the POA, the fingerprint authorization. No room.
+- **Room ticket** (junderground): "may this person enter this room, how many
+  times, until when?" Bound or bearer.
 - **Invite** (junderground): a bearer grant for an `invite` room, for a guest
   whose identity is not a house handle yet.
 
-A spouse or parent can hold a citizen ticket and a room ticket at once; the two
-systems do not need to merge to make that work.
+Do not merge them in the UI. They answer different questions.
 
 ## What the chat app must not do
 
