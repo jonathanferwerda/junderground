@@ -42,6 +42,15 @@ cowlib's current release carries an open advisory).
   not the record's key; never relax that to make an import easier.
 - **Administrator keys live in configuration** (`JG_ADMIN_KEYS`), never in a
   record, a log line, or the repository.
+- **The relationship graph never reaches the server.** Presence returns
+  handles and capabilities only. Do not add a grading endpoint or store a
+  people list here; `Relationships` is the reference rule for the house.
+- **Tickets are bound and spent server-side.** A ticket names one subject and
+  carries a use count; never turn one into a forwardable bearer link.
+- **A stop bumps the admission epoch.** Grants carry the epoch they were issued
+  under, so a suspension is instant; do not weaken that to a timestamp compare.
+- **Peers use their own record format** (`junderground-peer`) and their own
+  signature header (`X-JG-Peer`). A peer is not a house and has no handle.
 
 ## Boundary
 

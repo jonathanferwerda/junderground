@@ -165,4 +165,61 @@ defmodule Junderground.RoomsTest do
     assert {:ok, []} =
              Rooms.by_channel(Junderground.Constructs.channel_id(%{"communities" => "elsewhere"}))
   end
+
+  test "a ticket is bound to one person and is spent", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "ticket"}))
+    house("beta")
+
+    assert {:ok, ticket} =
+             Rooms.issue_ticket("alpha", "lobby", %{handle: "alpha"}, %{
+               "sub" => "beta",
+               "uses" => 1,
+               "caps" => ["join", "publish_audio"]
+             })
+
+    # the owner cannot spend a ticket minted for someone else
+    assert {:error, :forbidden} =
+             Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"ticket" => ticket["ticket"]})
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
+
+    assert "join" in grant["caps"]
+
+    assert {:error, :ticket_spent} =
+             Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"ticket" => ticket["ticket"]})
+  end
+
+  test "a direct room is only its members", %{pub: pub, priv: priv} do
+    assert {:ok, _} =
+             Rooms.register(room(pub, priv, %{"policy" => "direct", "members" => ["beta"]}))
+
+    house("beta")
+    house("gamma")
+
+    assert {:ok, _} = Rooms.grant("alpha", "lobby", %{handle: "beta"}, %{"caps" => ["join"]})
+    assert {:ok, _} = Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+
+    assert {:error, :forbidden} =
+             Rooms.grant("alpha", "lobby", %{handle: "gamma"}, %{"caps" => ["join"]})
+  end
+
+  test "a suspension kills grants already issued", %{pub: pub, priv: priv} do
+    assert {:ok, _} = Rooms.register(room(pub, priv, %{"policy" => "open"}))
+
+    assert {:ok, grant} =
+             Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+
+    assert {:ok, _} = Rooms.verify_grant(grant["grant"])
+
+    assert {:ok, _} = Admission.decide("alpha", "suspended", "test", "abuse", 0)
+    assert {:error, :revoked} = Rooms.verify_grant(grant["grant"])
+
+    assert {:ok, _} = Admission.decide("alpha", "approved", "test", "cleared", 0)
+
+    assert {:ok, fresh} =
+             Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+
+    assert {:ok, _} = Rooms.verify_grant(fresh["grant"])
+  end
 end

@@ -28,6 +28,7 @@ defmodule Junderground.Admission do
   @writer_statuses ~w(pending approved probation)
   @grant_statuses ~w(approved probation)
   @report_reasons ~w(spam abuse fraud impersonation illegal other)
+  @verdicts ~w(clear watch suspend ban)
 
   # ---- api -----------------------------------------------------------------
 
@@ -37,6 +38,7 @@ defmodule Junderground.Admission do
 
   def statuses, do: @statuses
   def report_reasons, do: @report_reasons
+  def verdicts, do: @verdicts
 
   def pending(handle, pubkey), do: GenServer.call(__MODULE__, {:pending, handle, pubkey})
   def status(handle), do: GenServer.call(__MODULE__, {:status, handle})
@@ -52,6 +54,18 @@ defmodule Junderground.Admission do
     do: GenServer.call(__MODULE__, {:report, target, reporter, reason, detail})
 
   def reports(since, limit \\ 100), do: GenServer.call(__MODULE__, {:reports, since, limit})
+
+  def review(handle, verdict, by, detail, evidence) do
+    GenServer.call(__MODULE__, {:review, handle, verdict, by, detail, evidence})
+  end
+
+  def reviews(since, limit \\ 100), do: GenServer.call(__MODULE__, {:reviews, since, limit})
+
+  @doc "The moment this house was last stopped; grants issued before it are dead."
+  def revoked_before(handle), do: GenServer.call(__MODULE__, {:revoked_before, handle})
+
+  @doc "Bumped on every stop; a grant carries the epoch it was issued under."
+  def epoch(handle), do: GenServer.call(__MODULE__, {:epoch, handle})
 
   def may_write?(handle), do: status_in?(handle, @writer_statuses)
   def may_create_room?(handle), do: status_in?(handle, ~w(approved))
@@ -86,7 +100,8 @@ defmodule Junderground.Admission do
     {:ok,
      %{
        audit_seq: counter(:audit_seq),
-       report_seq: counter(:report_seq)
+       report_seq: counter(:report_seq),
+       review_seq: counter(:review_seq)
      }}
   end
 
@@ -141,41 +156,71 @@ defmodule Junderground.Admission do
   end
 
   def handle_call({:decide, handle, status, by, reason, review_at}, _from, state) do
-    if status not in @statuses do
-      {:reply, {:error, :bad_status}, state}
-    else
-      now = System.system_time(:second)
-      existing = lookup(handle)
-
-      record =
-        (existing || %{"handle" => handle, "first_seen" => now})
-        |> Map.merge(%{
-          "handle" => handle,
-          "status" => status,
-          "since" => now,
-          "by" => by || "",
-          "reason" => reason || "",
-          "review_at" => if(is_integer(review_at), do: review_at, else: 0)
-        })
-
-      n = state.audit_seq + 1
-
-      :dets.insert(@table, [
-        {{:status, handle}, record},
-        {{:audit, n},
-         %{
-           "at" => now,
-           "handle" => handle,
-           "status" => status,
-           "by" => by || "",
-           "reason" => reason || "",
-           "review_at" => record["review_at"]
-         }},
-        {{:meta, :audit_seq}, n}
-      ])
-
-      {:reply, {:ok, record}, %{state | audit_seq: n}}
+    case decide_now(handle, status, by, reason, review_at, state) do
+      {:ok, record, state} -> {:reply, {:ok, record}, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:review, handle, verdict, by, detail, evidence}, _from, state) do
+    cond do
+      verdict not in @verdicts ->
+        {:reply, {:error, :bad_verdict}, state}
+
+      not is_binary(detail) or byte_size(detail) > 4_000 ->
+        {:reply, {:error, :bad_detail}, state}
+
+      not is_binary(evidence) or byte_size(evidence) > 4_000 ->
+        {:reply, {:error, :bad_evidence}, state}
+
+      true ->
+        now = System.system_time(:second)
+        n = state.review_seq + 1
+
+        review = %{
+          "at" => now,
+          "handle" => handle,
+          "verdict" => verdict,
+          "by" => by || "",
+          "detail" => detail,
+          "evidence" => evidence
+        }
+
+        :dets.insert(@table, [{{:review, n}, review}, {{:meta, :review_seq}, n}])
+        state = %{state | review_seq: n}
+
+        case verdict_status(verdict) do
+          nil ->
+            {:reply, {:ok, %{"review" => review, "admission" => nil}}, state}
+
+          status ->
+            case decide_now(handle, status, by, "agent review: " <> verdict, 0, state) do
+              {:ok, admission, state} ->
+                {:reply, {:ok, %{"review" => review, "admission" => admission}}, state}
+
+              {:error, reason, state} ->
+                {:reply, {:error, reason}, state}
+            end
+        end
+    end
+  end
+
+  def handle_call({:revoked_before, handle}, _from, state) do
+    case lookup(handle) do
+      nil -> {:reply, 0, state}
+      record -> {:reply, record["revoked_before"] || 0, state}
+    end
+  end
+
+  def handle_call({:epoch, handle}, _from, state) do
+    case lookup(handle) do
+      nil -> {:reply, 0, state}
+      record -> {:reply, record["epoch"] || 0, state}
+    end
+  end
+
+  def handle_call({:reviews, since, limit}, _from, state) do
+    {:reply, {:ok, collect(:review, since, max(limit, 0), state.review_seq)}, state}
   end
 
   def handle_call(:queue, _from, state) do
@@ -226,6 +271,57 @@ defmodule Junderground.Admission do
   def handle_call({:reports, since, limit}, _from, state) do
     {:reply, {:ok, collect(:report, since, max(limit, 0), state.report_seq)}, state}
   end
+
+  defp decide_now(handle, status, by, reason, review_at, state) do
+    if status not in @statuses do
+      {:error, :bad_status, state}
+    else
+      now = System.system_time(:second)
+      existing = lookup(handle)
+      stopped = status in ["suspended", "rejected", "banned"]
+
+      record =
+        (existing || %{"handle" => handle, "first_seen" => now})
+        |> Map.merge(%{
+          "handle" => handle,
+          "status" => status,
+          "since" => now,
+          "by" => by || "",
+          "reason" => reason || "",
+          "review_at" => if(is_integer(review_at), do: review_at, else: 0),
+          "revoked_before" =>
+            if(stopped, do: now, else: Map.get(existing || %{}, "revoked_before", 0)),
+          "epoch" =>
+            if(stopped,
+              do: Map.get(existing || %{}, "epoch", 0) + 1,
+              else: Map.get(existing || %{}, "epoch", 0)
+            )
+        })
+
+      n = state.audit_seq + 1
+
+      :dets.insert(@table, [
+        {{:status, handle}, record},
+        {{:audit, n},
+         %{
+           "at" => now,
+           "handle" => handle,
+           "status" => status,
+           "by" => by || "",
+           "reason" => reason || "",
+           "review_at" => record["review_at"]
+         }},
+        {{:meta, :audit_seq}, n}
+      ])
+
+      {:ok, record, %{state | audit_seq: n}}
+    end
+  end
+
+  defp verdict_status("watch"), do: "probation"
+  defp verdict_status("suspend"), do: "suspended"
+  defp verdict_status("ban"), do: "banned"
+  defp verdict_status(_clear), do: nil
 
   # ---- storage -------------------------------------------------------------
 

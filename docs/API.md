@@ -3,8 +3,9 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*. **v0.1.1 adds admission (administrator
-approval and probation), crest-bound identity, and construct dials.**
+today unless it is marked *planned*. **v0.1.2 adds peers (other jundergrounds
+through the same admission flow), presence and house-side relationship grading,
+tickets and private rooms, and an agent review endpoint.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -31,6 +32,12 @@ admin UI is optional and is not part of this contract.
    requests, so identity is not asserted, it is proved.
 9. **A dial is a construct tuple.** A room is tuned by the same eleven social
    constructs the Mail app uses, so the two sides agree on what a room is named.
+10. **A peer is a switch; a house is a person.** Other jundergrounds go through
+    the same admission states, but they peer with records of their own.
+11. **The relationship graph never leaves the house.** The switch publishes a
+    roster; the house grades it against its own people list and blacklist.
+12. **A ticket is a bound capability.** It names one subject, has a use count,
+    and is spent server-side — not a bearer link that can be forwarded.
 
 ## 2. Encoding
 
@@ -67,6 +74,34 @@ encoder fails the suite.
 
 A fingerprint is computed for display: upper-case SHA-256 of the public key in
 groups of four (`C6/P ZA4L W5IV …` in the Perl fixture).
+
+## 3b. Other jundergrounds (peers)
+
+A **peer** is another switch, not a house. It registers with a self-signed
+record and goes through the same admission states:
+
+```json
+{
+  "format": "junderground-peer",
+  "version": 1,
+  "name": "thejunderground",
+  "url": "https://thejunderground.example",
+  "pubkey": "C6/pZA4LW5IVvv8581VwHcTcjnnrOdPhcs/E9NKrYOM=",
+  "seq": 1,
+  "issued": 1760000000,
+  "sig": "w23ZvmFPjt1zNnPm5GmhHt70vjhAQGsMfQXkNyaYCHg52zcD4L2qBPiZHI2VjUdHL/5uMG7X+R6a5pPrPtCqCQ=="
+}
+```
+
+- `pending` — registered, not usable.
+- `approved` — may mirror records in, and is listed publicly.
+- `probation` — listed and readable, but may not push records in.
+- `suspended` / `rejected` / `banned` — no mirroring.
+
+A peer updates its name or URL with `seq + 1` and `prev` = the previous
+signature. A peer request carries `X-JG-Peer: <public key>` instead of a handle
+and signs the same message a house request does. A registration whose key is in
+`JG_ADMIN_KEYS` is approved on sight.
 
 ## 4. House records
 
@@ -229,6 +264,73 @@ an admitted house on that channel:
 A room that is not `advertised` is reachable by its owner and by handle, but
 does not appear on the dial.
 
+## 4c. Presence and relationship grading
+
+Presence is the room's roster: who is in it, with which capabilities, until when.
+
+```
+POST /v1/rooms/:handle/:room/presence       {"grant": "JG1…", "ttl": 120}
+POST /v1/rooms/:handle/:room/presence/leave {"presence_id": "…"}
+GET  /v1/rooms/:handle/:room/presence
+```
+
+`POST` verifies the grant, checks that it names this room and this subject, and
+upserts a roster entry. `ttl` is 120 seconds by default (max 600); a client
+refreshes with the same call. `GET` returns the roster for an `open` or
+advertised room, or for the owner; an invite/direct/ticket room shows it only
+after a grant is presented. An entry disappears on its own when its heartbeat
+lapses, so a crashed client leaves no ghost.
+
+**Grading happens in the house, never here.** The switch never receives a
+relationship map and has no `grade` endpoint. The reference rule is
+`Junderground.Relationships`:
+
+| Situation | Grade | Flags |
+| --- | --- | --- |
+| any blacklisted subject | `hostile` | `blacklisted` (and `block: true`) |
+| any subject marked hostile | `hostile` | `hostile` |
+| every subject unknown | `strangers` | `stranger` |
+| some unknown | `mixed` | `stranger` |
+| all known, some trusted | `known` | — |
+| all trusted | `trusted` | — |
+| nobody in the room | `empty` | — |
+
+`block: true` must stop the room opening, even when everyone else is a friend.
+jawnos should mirror these rules so the phone and the desktop agree.
+
+## 4d. Tickets and private rooms
+
+A room's `policy` says how someone is admitted:
+
+| Policy | Admission |
+| --- | --- |
+| `open` | any admitted house |
+| `house` | only the owning house |
+| `invite` | an invite grant from the owner, or a ticket |
+| `direct` | a handle in the room's `members` list |
+| `ticket` | a ticket bound to the requester |
+
+A **ticket** is a grant with `kind: "ticket"`, bound to one subject, with a use
+count. The owner mints it for a person — a spouse, a parent, a guest:
+
+```json
+POST /v1/rooms/alpha/lobby/tickets
+{"sub": "beta", "caps": ["join", "publish_audio"], "uses": 1, "expires": 1760600000}
+
+→ {"ticket": "JG1…", "jti": "…", "subject": "beta",
+   "caps": ["join", "publish_audio"], "expires": 1760600000, "uses": 1}
+```
+
+The ticket is stored server-side (uses, expiry, revoker) and is spent one use at
+a time by `POST …/token` with `{"ticket": "JG1…"}`. Only the named subject can
+spend it; a spent, expired or revoked ticket is refused. `GET …/tickets` (owner
+only) lists what is outstanding.
+
+A `direct` room is how a private conversation is named: two members, each
+admitted by membership. A house visit is the same idea with `policy: "ticket"`
+(or `direct`) and a ticket for the visitor — there is no separate "visit"
+endpoint, because a visit is just a room with a small door.
+
 ## 5. Signed requests
 
 Every write, and every read of a non-public house, carries:
@@ -275,7 +377,9 @@ All responses are JSON. Errors are `{"error":{"code":"…"}}`.
   "issued": 1760000000,
   "houses": 12,
   "max_skew": 300,
-  "features": ["signed-records", "room-grants", "turn-credentials", "admission", "crest", "constructs"],
+  "features": ["signed-records", "room-grants", "turn-credentials", "admission",
+               "crest", "constructs", "peers", "presence", "tickets"],
+  "peers": 3,
   "admission": {"requires_approval": true, "statuses": ["pending", "approved", "probation", "suspended", "rejected", "banned"], "admins": 1},
   "constructs": {"communities": "local", "clubs": "peers", "…": "…"},
   "turn": {"urls": ["turn:turn.thejunderground.example:3478"], "ttl": 600}
@@ -322,8 +426,9 @@ mirror with `POST /v1/mirror` instead when you need every record.
 
 ### `POST /v1/mirror`
 
-Unauthenticated in v1; every record is verified on its own. Intended for
-another junderground, and to sit behind a peer allowlist at the proxy.
+Requires an approved peer: the request carries `X-JG-Peer: <public key>` and is
+signed by that peer's key. Every record is still verified on its own, so a
+mirror cannot inject a record a house did not sign.
 
 ```json
 {"records": [ … ]}
@@ -545,6 +650,34 @@ automatically. Every decision is appended to the audit log.
 house cannot report itself. The report is filed once, with its reporter, and is
 read by the administrator's agent.
 
+### `GET /v1/admin/peers` · `GET /v1/admin/peers/queue`
+
+The peer list and its pending/probation queue, shaped like the house queue.
+
+### `POST /v1/admin/peers/:id/status`
+
+```json
+{"status": "approved", "reason": "known operator", "review_at": 0}
+```
+
+Same six states as a house. `GET /v1/admin/peers/audit` is the decision log.
+
+### `POST /v1/admin/houses/:handle/review`
+
+The agent's own record of a review, separate from a status change:
+
+```json
+{"verdict": "clear" | "watch" | "suspend" | "ban",
+ "detail": "posted identical words in nine rooms",
+ "evidence": "jawnos:appt:777"}
+```
+
+`watch` puts the house on probation, `suspend` suspends it, `ban` bans it, and
+`clear` records the review without changing the status. A stop bumps the house's
+**epoch**, which instantly invalidates every grant it already issued.
+
+`GET /v1/admin/reviews?since=0` lists reviews for the chat app.
+
 ## 10. Errors
 
 | Code | Status | Meaning |
@@ -570,6 +703,11 @@ read by the administrator's agent.
 | `bad_status` / `bad_reason` / `bad_detail` | 422 | malformed admin or report body |
 | `bad_crest` | 422 | crest key or fingerprint is not the record's |
 | `bad_constructs` / `bad_advertised` | 422 | malformed dial on a room |
+| `ticket_required` | 403 | a ticket room and no ticket |
+| `ticket_spent` | 409 | the ticket has no uses left |
+| `ticket_not_found` | 404 | the ticket is not one this switch issued |
+| `wrong_room` | 403 | a grant/ticket presented for another room |
+| `bad_verdict` / `bad_cap` / `bad_subject` | 422 | malformed review or ticket |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation

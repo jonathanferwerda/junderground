@@ -194,4 +194,55 @@ defmodule Junderground.AdminHttpTest do
 
     assert conn.status == 403
   end
+
+  test "an agent review suspends a house and kills its live grant", ctx do
+    {pub, priv} = house("alpha")
+    decide(ctx, "alpha", "approved")
+
+    room_body =
+      JSON.encode!(
+        Rooms.build("alpha", "lobby", pub, 1, %{"policy" => "open"})
+        |> Keys.sign_record(priv)
+      )
+
+    conn =
+      Plug.Test.conn(:post, "/v1/rooms", room_body)
+      |> signed(room_body, "alpha", priv)
+      |> call()
+
+    assert conn.status == 201
+
+    {:ok, grant} = Rooms.grant("alpha", "lobby", %{handle: "alpha"}, %{"caps" => ["join"]})
+    assert {:ok, _} = Rooms.verify_grant(grant["grant"])
+
+    body =
+      JSON.encode!(%{
+        "verdict" => "suspend",
+        "detail" => "abuse in a room",
+        "evidence" => "jawnos:appt:777"
+      })
+
+    conn =
+      Plug.Test.conn(:post, "/v1/admin/houses/alpha/review", body)
+      |> admin_signed(body, ctx.admin_pub, ctx.admin_priv)
+      |> call()
+
+    assert conn.status == 200
+
+    assert %{
+             "admission" => %{"status" => "suspended"},
+             "review" => %{"verdict" => "suspend"}
+           } = JSON.decode!(conn.resp_body)
+
+    assert {:error, :revoked} = Rooms.verify_grant(grant["grant"])
+
+    reviews =
+      call(
+        Plug.Test.conn(:get, "/v1/admin/reviews")
+        |> admin_signed("", ctx.admin_pub, ctx.admin_priv)
+      )
+
+    assert %{"reviews" => [%{"handle" => "alpha", "verdict" => "suspend"}]} =
+             JSON.decode!(reviews.resp_body)
+  end
 end

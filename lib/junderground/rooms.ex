@@ -18,7 +18,7 @@ defmodule Junderground.Rooms do
   @version 1
   @kinds ~w(register update tombstone)
   @slug ~r/^[a-z0-9][a-z0-9._-]{0,62}$/
-  @policies ~w(open house invite)
+  @policies ~w(open house invite direct ticket)
   @recordings ~w(off allow)
   @caps ~w(join publish_audio publish_video subscribe record moderate invite)
   @max_skew 3600
@@ -43,6 +43,7 @@ defmodule Junderground.Rooms do
         "name" => room,
         "constructs" => Constructs.defaults(),
         "advertised" => "no",
+        "members" => [],
         "policy" => "invite",
         "max" => 16,
         "recording" => "off",
@@ -148,8 +149,9 @@ defmodule Junderground.Rooms do
            {:ok, head} <- fetch(handle, room),
            :ok <- room_state(head),
            :ok <- owner_admitted(head["record"]["handle"]),
-           :ok <- access(head["record"], requester, body["invite"]),
-           {:ok, caps} <- clamp(head["record"], requester, body["caps"], body["invite"]) do
+           {:ok, ticket} <- consume_ticket(head["record"], requester, body["ticket"]),
+           :ok <- access(head["record"], requester, body["invite"], ticket),
+           {:ok, caps} <- clamp(head["record"], requester, body["caps"], body["invite"], ticket) do
         now = System.system_time(:second)
         probation = requester_record["status"] == "probation"
         ttl = Application.get_env(:junderground, :grant_ttl, 900)
@@ -173,6 +175,7 @@ defmodule Junderground.Rooms do
           "caps" => caps,
           "iat" => now,
           "exp" => expires,
+          "epoch" => Admission.epoch(handle),
           "jti" => random_id()
         }
 
@@ -210,6 +213,80 @@ defmodule Junderground.Rooms do
 
   def handle_call({:revoked?, jti}, _from, state) do
     {:reply, revoked_now?(jti), state}
+  end
+
+  def handle_call({:issue_ticket, handle, room, requester, body}, _from, state) do
+    reply =
+      with {:ok, head} <- fetch(handle, room),
+           :ok <- room_state(head),
+           :ok <- owner_only(head["record"], requester),
+           {:ok, sub} <- ticket_subject(body["sub"]),
+           {:ok, caps} <- ticket_caps(body["caps"]),
+           {:ok, uses} <- ticket_uses(body["uses"]),
+           {:ok, expires} <- ticket_expiry(body["expires"]) do
+        now = System.system_time(:second)
+        jti = random_id()
+
+        payload = %{
+          "format" => "junderground-grant",
+          "version" => 1,
+          "kind" => "ticket",
+          "iss" => Application.get_env(:junderground, :public_url, "http://localhost:4100"),
+          "room" => handle <> "/" <> room,
+          "room_key" => head["room_key"],
+          "sub" => sub,
+          "caps" => caps,
+          "iat" => now,
+          "exp" => expires,
+          "epoch" => Admission.epoch(handle),
+          "jti" => jti,
+          "uses" => uses
+        }
+
+        stored = %{
+          "room" => handle <> "/" <> room,
+          "sub" => sub,
+          "caps" => caps,
+          "exp" => expires,
+          "uses_left" => uses,
+          "by" => requester.handle
+        }
+
+        :dets.insert(@table, {{:ticket, jti}, stored})
+
+        {:ok,
+         %{
+           "ticket" => Token.mint(payload, ServerKey.private()),
+           "jti" => jti,
+           "room" => payload["room"],
+           "subject" => sub,
+           "caps" => caps,
+           "expires" => expires,
+           "uses" => uses
+         }}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_tickets, handle, room}, _from, state) do
+    room_id = handle <> "/" <> room
+
+    tickets =
+      :dets.select(@table, [{{{:ticket, :"$1"}, :"$2"}, [], [:"$1", :"$2"]}])
+      |> Enum.filter(fn {_jti, stored} -> stored["room"] == room_id end)
+      |> Enum.map(fn {jti, stored} ->
+        %{
+          "jti" => jti,
+          "subject" => stored["sub"],
+          "caps" => stored["caps"],
+          "expires" => stored["exp"],
+          "uses_left" => stored["uses_left"]
+        }
+      end)
+      |> Enum.sort_by(& &1["expires"])
+
+    {:reply, {:ok, tickets}, state}
   end
 
   # ---- validation ----------------------------------------------------------
@@ -278,6 +355,9 @@ defmodule Junderground.Rooms do
       record["advertised"] not in ["yes", "no"] ->
         {:error, :bad_advertised}
 
+      not valid_members?(record["members"]) ->
+        {:error, :bad_members}
+
       true ->
         :ok
     end
@@ -345,7 +425,7 @@ defmodule Junderground.Rooms do
     if expires > 0 and expires <= System.system_time(:second), do: {:error, :expired}, else: :ok
   end
 
-  defp access(record, requester, invite) do
+  defp access(record, requester, invite, ticket) do
     cond do
       requester.handle == record["handle"] ->
         :ok
@@ -353,8 +433,19 @@ defmodule Junderground.Rooms do
       record["policy"] == "open" ->
         :ok
 
+      record["policy"] == "house" ->
+        {:error, :forbidden}
+
+      record["policy"] == "direct" ->
+        if requester.handle in (record["members"] || []), do: :ok, else: {:error, :forbidden}
+
       record["policy"] == "invite" ->
-        if invite_ok?(invite, record), do: :ok, else: {:error, :invite_required}
+        if invite_ok?(invite, record) or ticket != nil,
+          do: :ok,
+          else: {:error, :invite_required}
+
+      record["policy"] == "ticket" ->
+        if ticket != nil, do: :ok, else: {:error, :ticket_required}
 
       true ->
         {:error, :forbidden}
@@ -374,7 +465,7 @@ defmodule Junderground.Rooms do
 
   defp invite_ok?(_token, _record), do: false
 
-  defp clamp(record, requester, requested, invite) do
+  defp clamp(record, requester, requested, invite, ticket) do
     requested =
       if is_list(requested) and requested != [] do
         requested
@@ -394,10 +485,14 @@ defmodule Junderground.Rooms do
       end
 
     allowed =
-      MapSet.new(
-        ["join", "publish_audio", "publish_video", "subscribe"] ++
-          owner_caps ++ record_caps ++ invited_caps
-      )
+      if ticket do
+        MapSet.new(ticket["caps"] || [])
+      else
+        MapSet.new(
+          ["join", "publish_audio", "publish_video", "subscribe"] ++
+            owner_caps ++ record_caps ++ invited_caps
+        )
+      end
 
     cond do
       not Enum.all?(requested, &(&1 in @caps)) ->
@@ -416,6 +511,8 @@ defmodule Junderground.Rooms do
       cond do
         Token.expired?(payload) -> {:error, :expired}
         revoked_now?(payload["jti"]) -> {:error, :revoked}
+        stale_epoch?(payload) -> {:error, :revoked}
+        suspended_subject?(payload["sub"]) -> {:error, :revoked}
         true -> {:ok, payload}
       end
     end
@@ -440,6 +537,41 @@ defmodule Junderground.Rooms do
 
   defp revoked_now?(_), do: false
 
+  # A suspension is immediate for grants already in the wild: anything issued
+  # before the stop began is dead, for the room's owner and for its subject.
+  # A stop bumps the owner's epoch, so every grant issued before it dies at
+  # once; a new grant carries the new epoch. A suspended subject is refused
+  # even if its old grant is still inside its 15 minutes.
+  defp stale_epoch?(payload) do
+    owner =
+      payload["room"]
+      |> to_string()
+      |> String.split("/", parts: 2)
+      |> hd()
+
+    Admission.epoch(owner) != (payload["epoch"] || 0)
+  end
+
+  defp suspended_subject?(sub) when is_binary(sub) do
+    case Admission.status(sub) do
+      {:ok, %{"status" => status}} -> status not in ["approved", "probation", "pending"]
+      _ -> false
+    end
+  end
+
+  defp suspended_subject?(_sub), do: false
+
+  defp valid_members?(nil), do: true
+
+  defp valid_members?(members) when is_list(members) and length(members) <= 32 do
+    Enum.all?(members, fn member ->
+      is_binary(member) and byte_size(member) > 0 and byte_size(member) <= 64 and
+        not String.match?(member, ~r/[[:cntrl:]]/)
+    end)
+  end
+
+  defp valid_members?(_members), do: false
+
   defp owner_only(record, requester) do
     if requester.handle == record["handle"], do: :ok, else: {:error, :forbidden}
   end
@@ -448,6 +580,106 @@ defmodule Junderground.Rooms do
   defp valid_jti(_), do: {:error, :bad_jti}
 
   defp random_id, do: :crypto.strong_rand_bytes(12) |> Base.url_encode64(padding: false)
+
+  # ---- tickets -------------------------------------------------------------
+
+  def issue_ticket(handle, room, requester, body) do
+    GenServer.call(__MODULE__, {:issue_ticket, handle, room, requester, body})
+  end
+
+  def list_tickets(handle, room), do: GenServer.call(__MODULE__, {:list_tickets, handle, room})
+
+  defp consume_ticket(record, requester, token) do
+    cond do
+      record["policy"] == "ticket" and not is_binary(token) ->
+        {:error, :ticket_required}
+
+      not is_binary(token) ->
+        {:ok, nil}
+
+      true ->
+        with {:ok, payload} <- verify_grant_token(token),
+             :ok <- ticket_kind(payload),
+             :ok <- ticket_for_room(payload, record),
+             :ok <- ticket_for_subject(payload, requester),
+             {:ok, stored} <- ticket_lookup(payload["jti"]),
+             :ok <- ticket_usable(stored, requester) do
+          :dets.insert(
+            @table,
+            {{:ticket, payload["jti"]}, Map.put(stored, "uses_left", stored["uses_left"] - 1)}
+          )
+
+          {:ok, payload}
+        end
+    end
+  end
+
+  defp ticket_kind(%{"kind" => "ticket"}), do: :ok
+  defp ticket_kind(_payload), do: {:error, :bad_ticket}
+
+  defp ticket_for_room(payload, record) do
+    if payload["room"] == record["handle"] <> "/" <> record["room"],
+      do: :ok,
+      else: {:error, :bad_ticket}
+  end
+
+  defp ticket_for_subject(payload, requester) do
+    if payload["sub"] == requester.handle, do: :ok, else: {:error, :forbidden}
+  end
+
+  defp ticket_lookup(jti) do
+    case :dets.lookup(@table, {:ticket, jti}) do
+      [{{:ticket, ^jti}, stored}] -> {:ok, stored}
+      _ -> {:error, :ticket_not_found}
+    end
+  end
+
+  defp ticket_usable(stored, requester) do
+    cond do
+      stored["sub"] != requester.handle -> {:error, :forbidden}
+      stored["uses_left"] <= 0 -> {:error, :ticket_spent}
+      stored["exp"] <= System.system_time(:second) -> {:error, :expired}
+      true -> :ok
+    end
+  end
+
+  defp ticket_subject(sub) when is_binary(sub) do
+    if byte_size(sub) > 0 and byte_size(sub) <= 64 and not String.match?(sub, ~r/[[:cntrl:]]/),
+      do: {:ok, sub},
+      else: {:error, :bad_subject}
+  end
+
+  defp ticket_subject(_sub), do: {:error, :bad_subject}
+
+  defp ticket_caps(nil), do: {:ok, ["join", "publish_audio", "subscribe"]}
+
+  defp ticket_caps(caps) when is_list(caps) do
+    caps = Enum.uniq(caps)
+
+    if Enum.all?(caps, &(&1 in @caps)) and "join" in caps do
+      {:ok, Enum.sort(caps)}
+    else
+      {:error, :bad_cap}
+    end
+  end
+
+  defp ticket_caps(_caps), do: {:error, :bad_cap}
+
+  defp ticket_uses(nil), do: {:ok, 1}
+  defp ticket_uses(n) when is_integer(n) and n >= 1 and n <= 100, do: {:ok, n}
+  defp ticket_uses(_n), do: {:error, :bad_uses}
+
+  defp ticket_expiry(nil), do: {:ok, System.system_time(:second) + 7 * 86_400}
+
+  defp ticket_expiry(n) when is_integer(n) do
+    now = System.system_time(:second)
+
+    if n > now and n <= now + 30 * 86_400,
+      do: {:ok, n},
+      else: {:error, :bad_expires}
+  end
+
+  defp ticket_expiry(_n), do: {:error, :bad_expires}
 
   # ---- storage -------------------------------------------------------------
 

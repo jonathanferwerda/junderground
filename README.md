@@ -8,11 +8,14 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.1** — the directory, the record chain, administrator approval
-> and probation, crest-bound identity, construct dials, room records, grants,
-> revocations, TURN credentials and the HTTP API are implemented and tested
-> (47 tests). The media plane (signaling, SFU, coturn deployment) is designed
-> but not built. See `docs/API.md` for the contract and the boundary.
+> Status: **v0.1.2** — the directory, the record chain, administrator approval
+> and probation, crest-bound identity, construct dials, peer onboarding for
+> other jundergrounds, presence and house-side relationship grading, tickets
+> and private rooms, room records, grants, revocations, TURN credentials and the
+> HTTP API are implemented and tested (66 tests). The media plane (signaling,
+> SFU, coturn deployment) is designed but not built. See `docs/API.md` for the
+> contract, `docs/CHAT-ADMIN.md` for the administrator's screen, and the
+> boundary below.
 
 ## Why it exists
 
@@ -34,6 +37,18 @@ land in the same queue.
 
 **Crests are the identity.** The record's signing key is the crest key, and a
 crest block may bind it to the crest uuid and name jawnos already knows.
+
+**Other jundergrounds are peers, not houses.** A peer registers with its own
+signed record and goes through the same admission states; only an approved peer
+may mirror records in, and probation is read-only.
+
+**Relationships stay in the house.** The switch publishes a room's roster; the
+house grades it against its own people list and blacklist and decides whether to
+flag the room before opening. The switch never receives the graph.
+
+**Tickets are bound capabilities.** A room ticket names one person, has a use
+count and is spent server-side; a private conversation is a `direct` room and a
+visit to a house is a ticket-bound room.
 
 **Rooms are dialled by social construct.** The eleven kinds and defaults are
 copied from jawnos `gb.pl`, and the channel id is the same tuple the Mail app
@@ -74,6 +89,10 @@ The switch generates its Ed25519 identity on first boot at
 | Directory lookup, history, global feed, mirroring | done |
 | Signed request auth (timestamp + nonce + body hash) | done |
 | Administrator approval, probation, suspension, audit log | done |
+| Peer onboarding for other jundergrounds | done |
+| Presence roster and house-side relationship grading | done |
+| Room tickets, direct/private rooms, ticket-bound visits | done |
+| Agent review endpoint and instant suspension (epoch) | done |
 | Abuse reports and the admin/agent queue | done |
 | Crest binding (crest key = signing key) | done |
 | Rooms keyed by the Mail app's construct dial | done |
@@ -94,6 +113,9 @@ lib/junderground/
   rooms.ex       room records, construct dials, grants, revocation
   constructs.ex  the eleven social constructs and the channel tuple
   admission.ex   pending / approved / probation / suspended / rejected / banned
+  peers.ex       other jundergrounds, peer-signed mirror requests
+  presence.ex    who is in a room (no relationship data)
+  relationships.ex  the house-side room grading rule
   admin.ex       administrator (or approval agent) signed requests
   token.ex       JG1 capability tokens
   turn.ex        coturn credentials
@@ -101,6 +123,7 @@ lib/junderground/
   server_key.ex  the switch's own identity
   router.ex      the /v1 HTTP surface
 docs/API.md      the API sketch and boundary
+docs/CHAT-ADMIN.md  the administrator's screen in the chat app
 ```
 
 ## Interop with jawnos
@@ -120,5 +143,6 @@ The signed bytes are the same convention jawnos already uses for crests
 2. Signaling: a WebSocket room channel, ICE config from the grant.
 3. coturn deployment and the TURN fallback path.
 4. An SFU adapter (LiveKit is the current favourite) and media tests.
-5. The jawnos client: verify a record, dial by construct, join a room, and let
-   the call bot be a room participant.
+5. The jawnos client: verify a record, dial by construct, grade the roster,
+   join a room, and let the call bot be a room participant.
+6. The Chat app's Underground section, per `docs/CHAT-ADMIN.md`.

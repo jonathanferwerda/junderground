@@ -11,6 +11,8 @@ defmodule Junderground.Application do
           {Junderground.Admission, []},
           {Junderground.Directory, []},
           {Junderground.Rooms, []},
+          {Junderground.Peers, []},
+          Junderground.Presence,
           {Bandit,
            plug: Junderground.Router, port: Application.get_env(:junderground, :port, 4100)}
         ]

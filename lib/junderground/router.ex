@@ -6,7 +6,7 @@ defmodule Junderground.Router do
 
   use Plug.Router
 
-  alias Junderground.{Admin, Admission, Auth, Constructs, Directory, Rooms}
+  alias Junderground.{Admin, Admission, Auth, Constructs, Directory, Peers, Presence, Rooms}
 
   plug(Plug.RequestId)
   plug(Plug.Logger, log: :debug)
@@ -34,8 +34,12 @@ defmodule Junderground.Router do
         "turn-credentials",
         "admission",
         "crest",
-        "constructs"
+        "constructs",
+        "peers",
+        "presence",
+        "tickets"
       ],
+      "peers" => peer_count(),
       "admission" => %{
         "requires_approval" => not Application.get_env(:junderground, :auto_approve, false),
         "statuses" => Admission.statuses(),
@@ -67,6 +71,49 @@ defmodule Junderground.Router do
       |> Enum.map(&room_meta/1)
 
     json(conn, 200, %{"channel" => channel, "constructs" => constructs, "rooms" => rooms})
+  end
+
+  # ---- other jundergrounds ---------------------------------------------
+
+  post "/v1/peers" do
+    case read_json(conn) do
+      {:ok, conn, _raw, record} ->
+        case Peers.register(record) do
+          {:ok, info} ->
+            json(conn, 201, %{"ok" => true, "id" => info.id, "status" => info.status})
+
+          {:error, reason} ->
+            fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/peers" do
+    {:ok, peers} = Peers.list()
+    json(conn, 200, %{"peers" => peers})
+  end
+
+  get "/v1/peers/:id" do
+    case Peers.get(id) do
+      {:ok, peer} ->
+        if peer["status"] in ["approved", "probation"] do
+          json(conn, 200, %{
+            "id" => peer["id"],
+            "name" => peer["record"]["name"],
+            "url" => peer["record"]["url"],
+            "pubkey" => peer["record"]["pubkey"],
+            "status" => peer["status"]
+          })
+        else
+          fail(conn, :not_found)
+        end
+
+      _ ->
+        fail(conn, :not_found)
+    end
   end
 
   # ---- house records ---------------------------------------------------
@@ -188,15 +235,19 @@ defmodule Junderground.Router do
 
   post "/v1/mirror" do
     case read_json(conn) do
-      {:ok, conn, _raw, %{"records" => records}} when is_list(records) ->
-        {:ok, results} = Directory.mirror(records)
+      {:ok, conn, raw, %{"records" => records}} when is_list(records) ->
+        with {:ok, _peer} <- Peers.verify(conn, raw) do
+          {:ok, results} = Directory.mirror(records)
 
-        json(conn, 200, %{
-          "results" =>
-            Enum.map(results, fn {handle, result} ->
-              %{"handle" => handle, "result" => to_string(result)}
-            end)
-        })
+          json(conn, 200, %{
+            "results" =>
+              Enum.map(results, fn {handle, result} ->
+                %{"handle" => handle, "result" => to_string(result)}
+              end)
+          })
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
 
       {:ok, conn, _raw, _body} ->
         fail(conn, :bad_request)
@@ -310,6 +361,103 @@ defmodule Junderground.Router do
     end
   end
 
+  post "/v1/rooms/:handle/:room/tickets" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             {:ok, ticket} <- Rooms.issue_ticket(handle, room, requester, body) do
+          json(conn, 201, ticket)
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/rooms/:handle/:room/tickets" do
+    with {:ok, requester} <- Auth.verify(conn, ""),
+         :ok <- same_handle(requester, handle),
+         {:ok, tickets} <- Rooms.list_tickets(handle, room) do
+      json(conn, 200, %{"tickets" => tickets})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/rooms/:handle/:room/presence" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             {:ok, payload} <- Rooms.verify_grant(body["grant"]),
+             :ok <- grant_room(payload, handle, room),
+             :ok <- grant_subject(payload, requester),
+             {:ok, entry, roster} <-
+               Presence.join(
+                 handle <> "/" <> room,
+                 requester.handle,
+                 payload["caps"] || [],
+                 payload["jti"],
+                 body["ttl"]
+               ) do
+          json(conn, 200, %{
+            "presence_id" => entry["id"],
+            "expires" => entry["expires"],
+            "room" => handle <> "/" <> room,
+            "roster" => roster,
+            "count" => length(roster)
+          })
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  post "/v1/rooms/:handle/:room/presence/leave" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             :ok <- Presence.leave(handle <> "/" <> room, body["presence_id"], requester.handle) do
+          json(conn, 200, %{"ok" => true})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/rooms/:handle/:room/presence" do
+    case Rooms.latest(handle, room) do
+      {:ok, head} ->
+        viewer = viewer(conn)
+
+        open? =
+          head["record"]["policy"] == "open" or head["advertised"] or
+            match?(%{handle: ^handle}, viewer)
+
+        if open? do
+          {:ok, roster} = Presence.roster(handle <> "/" <> room)
+
+          json(conn, 200, %{
+            "room" => handle <> "/" <> room,
+            "roster" => roster,
+            "count" => length(roster)
+          })
+        else
+          fail(conn, :forbidden)
+        end
+
+      {:error, _} ->
+        fail(conn, :not_found)
+    end
+  end
+
   # ---- administrator (a person or an approval agent) --------------------
 
   get "/v1/admin/queue" do
@@ -380,6 +528,91 @@ defmodule Junderground.Router do
       json(conn, 200, %{"reports" => records})
     else
       {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/admin/houses/:handle/review" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, admin} <- Admin.verify(conn, raw),
+             {:ok, result} <-
+               Admission.review(
+                 handle,
+                 body["verdict"],
+                 "admin:" <> String.slice(admin.admin, 0, 12),
+                 body["detail"] || "",
+                 body["evidence"] || ""
+               ) do
+          json(conn, 200, result)
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/reviews" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    since = int_param(conn.query_params["since"], 0)
+
+    with {:ok, _admin} <- Admin.verify(conn, ""),
+         {:ok, records} <- Admission.reviews(since) do
+      json(conn, 200, %{"reviews" => records})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/peers" do
+    with {:ok, _admin} <- Admin.verify(conn, "") do
+      {:ok, peers} = Peers.list()
+      json(conn, 200, %{"peers" => peers, "queue" => Peers.queue()})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/peers/queue" do
+    with {:ok, _admin} <- Admin.verify(conn, "") do
+      json(conn, 200, Peers.queue())
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/admin/peers/audit" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    since = int_param(conn.query_params["since"], 0)
+
+    with {:ok, _admin} <- Admin.verify(conn, ""),
+         {:ok, records} <- Peers.audit(since) do
+      json(conn, 200, %{"decisions" => records})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/admin/peers/:id/status" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, admin} <- Admin.verify(conn, raw),
+             {:ok, peer} <-
+               Peers.decide(
+                 id,
+                 body["status"],
+                 "admin:" <> String.slice(admin.admin, 0, 12),
+                 body["reason"],
+                 body["review_at"]
+               ) do
+          json(conn, 200, %{"ok" => true, "id" => peer["id"], "status" => peer["status"]})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
     end
   end
 
@@ -457,6 +690,29 @@ defmodule Junderground.Router do
     if Admission.may_write?(handle), do: :ok, else: {:error, :not_admitted}
   end
 
+  defp peer_count do
+    if Process.whereis(Peers) do
+      case Peers.list() do
+        {:ok, peers} -> length(peers)
+        _ -> 0
+      end
+    else
+      0
+    end
+  end
+
+  defp grant_room(%{"room" => value}, handle, room) do
+    if value == handle <> "/" <> room, do: :ok, else: {:error, :wrong_room}
+  end
+
+  defp grant_room(_payload, _handle, _room), do: {:error, :bad_grant}
+
+  defp grant_subject(%{"sub" => sub}, %{handle: handle}) do
+    if sub == handle, do: :ok, else: {:error, :forbidden}
+  end
+
+  defp grant_subject(_payload, _requester), do: {:error, :bad_grant}
+
   defp same_handle(%{handle: handle}, handle), do: :ok
   defp same_handle(_requester, _handle), do: {:error, :forbidden}
 
@@ -513,6 +769,11 @@ defmodule Junderground.Router do
   defp status_for(:retired), do: 410
   defp status_for(:expired), do: 410
   defp status_for(:room_closed), do: 410
+  defp status_for(:ticket_required), do: 403
+  defp status_for(:ticket_spent), do: 409
+  defp status_for(:ticket_not_found), do: 404
+  defp status_for(:wrong_room), do: 403
+  defp status_for(:bad_grant), do: 422
 
   defp status_for(reason)
        when reason in [

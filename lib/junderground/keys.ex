@@ -57,6 +57,14 @@ defmodule Junderground.Keys do
     end
   end
 
+  @doc "A stable, URL-safe id for a public key: SHA-256 hex of the raw key."
+  def key_id(pub64) do
+    case Base.decode64(pub64) do
+      {:ok, pub} -> Canonical.sha256_hex(pub)
+      _ -> nil
+    end
+  end
+
   @doc "True when `value` is a base64 raw Ed25519 public key."
   def valid_public_key?(value) when is_binary(value) do
     case Base.decode64(value) do
