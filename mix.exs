@@ -20,7 +20,8 @@ defmodule Junderground.MixProject do
 
   defp deps do
     [
-      {:bandit, "~> 1.6"}
+      {:bandit, "~> 1.6"},
+      {:websock_adapter, "~> 0.5"}
     ]
   end
 end

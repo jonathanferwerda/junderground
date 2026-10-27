@@ -510,6 +510,59 @@ A ticket says what it can do through `grants`; the switch enforces only
 `warranty` is signed by the ticket issuer because it is inside the ticket, and
 the switch records it without adjudicating it.
 
+## 4h. Signaling
+
+A room's media handshake is relayed over one WebSocket per house:
+
+```
+GET /v1/rooms/:handle/:room/ws?grant=JG1…      Upgrade: websocket
+```
+
+The grant is verified before the upgrade (room, subject, `join` cap, epoch,
+door, rental window) exactly as `POST …/presence` verifies it; a bad, expired,
+revoked or suspended grant is refused with the same status the HTTP route uses.
+The URL carries the grant because a browser cannot set an `Authorization`
+header on a WebSocket — treat it as a short-lived credential and do not log it.
+
+Once open, the switch sends:
+
+```json
+{"type": "hello", "room": "alpha/lobby", "subject": "alpha", "role": "citizen",
+ "caps": ["join", "publish_audio", "subscribe"], "peers": 2, "ice_servers": []}
+```
+
+`ice_servers` is `Turn.credentials/1` — empty until the operator sets
+`JG_TURN_URLS` / `JG_TURN_SECRET`, which is the normal path on a tailnet.
+
+The client then sends one of four frames:
+
+```json
+{"type": "offer",  "sdp": "v=0…", "to": "jti-or-absent"}
+{"type": "answer", "sdp": "v=0…", "to": "jti-or-absent"}
+{"type": "ice",    "candidate": {"candidate": "…"}, "to": "jti-or-absent"}
+{"type": "bye"}
+```
+
+The switch stamps every relayed frame with `from` (the grant's subject),
+`from_jti` and `at`; a client-supplied `from` is discarded. With `to` the frame
+goes to that grant id only (an unknown id answers `{"type":"error","error":"no
+such peer"}`); without it the frame goes to every other socket in the room. No
+payload is copied except `sdp`/`candidate`/`to`, so nothing arbitrary is
+broadcast, and a frame over 32 KiB is refused.
+
+Join and leave are also announced to the room:
+
+```json
+{"type": "join",  "from": "beta", "subject": "beta", "at": 1760000000}
+{"type": "leave", "from": "beta", "subject": "beta", "at": 1760000000}
+```
+
+Media never reaches the switch. The socket re-checks its grant every 15
+seconds; a suspension (which bumps the admission epoch) or a revocation closes
+the channel without a client message. Presence stays the HTTP roster — a socket
+is not a roster entry, and a joined house should still heartbeat `…/presence`
+so the room's `GET` sees it.
+
 ## 5. Signed requests
 
 Every write, and every read of a non-public house, carries:
@@ -672,6 +725,12 @@ Signed request by the room's owner:
 ```
 
 The `jti` stops verifying immediately and is forgotten after `expires`.
+
+### `GET /v1/rooms/:handle/:room/ws?grant=…`
+
+Upgrades to the room's signaling WebSocket. `101` on success; the grant's own
+status (`403`, `409`, `410`, `422`) otherwise, and `426` when the request is not
+a WebSocket upgrade. See §4h for the frames.
 
 ## 7. Rooms
 

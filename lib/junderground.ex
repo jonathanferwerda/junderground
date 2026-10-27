@@ -8,7 +8,7 @@ defmodule Junderground do
   emergency-calling or carrier obligations; see `docs/API.md` for the boundary.
   """
 
-  @version "0.1.0"
+  @version "0.1.8"
 
   def version, do: @version
 end

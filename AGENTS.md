@@ -80,6 +80,10 @@ cowlib's current release carries an open advisory).
 - **A citizen ticket is never stored here.** It is jawnos' delegated login, not
   a room admission; the switch only knows a room ticket and its subject.
 
+- **Signaling is metadata only.** The room's WebSocket relays `offer`,
+  `answer`, `ice` and `bye` between grants; the switch never handles media,
+  never stores an SDP, and stamps `from` from the verified grant (a client's own
+  `from` is dropped). The socket re-checks its grant, so a stop closes it.
 ## Boundary
 
 No PSTN, no DIDs, no 911, no carrier obligations. Media is chat-room class.

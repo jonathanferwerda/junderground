@@ -523,6 +523,37 @@ defmodule Junderground.Router do
     end
   end
 
+  # The room's signaling channel: a WebSocket that relays offers, answers and
+  # ICE between the houses joined to one room. The grant's `jti` names the
+  # socket; media never touches the switch. A revoked or suspended grant closes
+  # the channel on the socket's next check, not on the client's next message.
+  get "/v1/rooms/:handle/:room/ws" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    token = conn.params["grant"]
+
+    with true <- websocket?(conn) || {:error, :not_websocket},
+         {:ok, payload} <- Rooms.verify_grant(token),
+         :ok <- grant_room(payload, handle, room),
+         :ok <- grant_join(payload) do
+      WebSockAdapter.upgrade(
+        conn,
+        Junderground.Signaling.Socket,
+        %{
+          token: token,
+          handle: handle,
+          room: room,
+          jti: payload["jti"],
+          subject: payload["sub"],
+          role: payload["role"] || "guest",
+          caps: payload["caps"] || []
+        },
+        timeout: Application.get_env(:junderground, :ws_idle_timeout, 120_000)
+      )
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
   post "/v1/rooms/:handle/:room/presence" do
     case read_json(conn) do
       {:ok, conn, raw, body} ->
@@ -901,6 +932,16 @@ defmodule Junderground.Router do
       is_binary(payload["rental"]) or payload["role"] in ["citizen", "resident"]
   end
 
+  defp websocket?(conn) do
+    conn
+    |> Plug.Conn.get_req_header("upgrade")
+    |> Enum.any?(&(String.downcase(&1) == "websocket"))
+  end
+
+  defp grant_join(payload) do
+    if "join" in (payload["caps"] || []), do: :ok, else: {:error, :forbidden}
+  end
+
   defp grant_room(%{"room" => value}, handle, room) do
     if value == handle <> "/" <> room, do: :ok, else: {:error, :wrong_room}
   end
@@ -1013,5 +1054,6 @@ defmodule Junderground.Router do
        do: 409
 
   defp status_for(:revoked), do: 409
+  defp status_for(:not_websocket), do: 426
   defp status_for(_), do: 422
 end
