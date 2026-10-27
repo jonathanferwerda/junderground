@@ -68,7 +68,7 @@ defmodule Junderground.Signaling.Protocol do
   """
 
   @max_bytes 32_768
-  @kinds ~w(offer answer ice bye)
+  @kinds ~w(offer answer ice bye video)
 
   def max_bytes, do: @max_bytes
   def kinds, do: @kinds
@@ -104,6 +104,12 @@ defmodule Junderground.Signaling.Protocol do
           is_nil(msg["candidate"]) -> {:error, "missing candidate"}
           byte_size(JSON.encode!(msg["candidate"])) > 4096 -> {:error, "candidate too large"}
           true -> finish(%{"type" => "ice", "candidate" => msg["candidate"]}, msg, sender)
+        end
+
+      kind == "video" ->
+        cond do
+          msg["want"] not in ["on", "off"] -> {:error, "want must be on or off"}
+          true -> finish(%{"type" => "video", "want" => msg["want"]}, msg, sender)
         end
 
       true ->

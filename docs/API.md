@@ -535,14 +535,20 @@ Once open, the switch sends:
 `ice_servers` is `Turn.credentials/1` — empty until the operator sets
 `JG_TURN_URLS` / `JG_TURN_SECRET`, which is the normal path on a tailnet.
 
-The client then sends one of four frames:
+The client then sends one of five frames:
 
 ```json
 {"type": "offer",  "sdp": "v=0…", "to": "jti-or-absent"}
 {"type": "answer", "sdp": "v=0…", "to": "jti-or-absent"}
 {"type": "ice",    "candidate": {"candidate": "…"}, "to": "jti-or-absent"}
 {"type": "bye"}
+{"type": "video", "want": "on", "to": "jti"}
 ```
+
+`video` is the pull request: the listener asks the publisher for its camera, and
+the publisher answers with a new offer carrying a video track. Passing
+`"want": "off"` asks it to stop. The feed is only ever sent because someone
+asked for it.
 
 The switch stamps every relayed frame with `from` (the grant's subject),
 `from_jti` and `at`; a client-supplied `from` is discarded. With `to` the frame

@@ -84,6 +84,14 @@ defmodule Junderground.SignalingTest do
     {ice, b} = recv_text(b)
     assert %{"type" => "ice", "candidate" => "c", "from" => "alpha"} = JSON.decode!(ice)
 
+    send_text(a, JSON.encode!(%{"type" => "video", "want" => "on", "to" => payload["jti"]}))
+    {video, b} = recv_text(b)
+    assert %{"type" => "video", "want" => "on", "from" => "alpha"} = JSON.decode!(video)
+
+    send_text(a, JSON.encode!(%{"type" => "video", "want" => "maybe"}))
+    {bad_video, a} = recv_text(a)
+    assert JSON.decode!(bad_video)["type"] == "error"
+
     send_text(b, JSON.encode!(%{"type" => "nonsense"}))
     {err, b} = recv_text(b)
     assert JSON.decode!(err)["type"] == "error"
