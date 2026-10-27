@@ -247,4 +247,28 @@ defmodule Junderground.AdminHttpTest do
     assert %{"reviews" => [%{"handle" => "alpha", "verdict" => "suspend"}]} =
              JSON.decode!(reviews.resp_body)
   end
+  test "the administrator's language names the dial, not its identity", ctx do
+    body = JSON.encode!(%{"language" => "de"})
+
+    conn =
+      Plug.Test.conn(:post, "/v1/admin/language", body)
+      |> admin_signed(body, ctx.admin_pub, ctx.admin_priv)
+      |> call()
+
+    assert conn.status == 200
+    assert JSON.decode!(conn.resp_body)["language"] == "de"
+
+    dial =
+      call(Plug.Test.conn(:get, "/v1/dial?events=Christmas&communities=M%C3%BCnchen"))
+
+    assert dial.status == 200
+    kept = JSON.decode!(dial.resp_body)
+    assert kept["dial"] == %{"events" => "christmas", "communities" => "munchen"}
+    assert kept["names"] == %{"events" => "Weihnachten", "communities" => "munchen"}
+    assert kept["unknown"] == %{"communities" => "München"}
+    assert kept["language"] == "de"
+
+    german = call(Plug.Test.conn(:get, "/v1/dial?events=Weihnachten"))
+    assert JSON.decode!(german.resp_body)["dial"] == %{"events" => "christmas"}
+  end
 end

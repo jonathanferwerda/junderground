@@ -39,6 +39,8 @@ defmodule Junderground.Router do
       "issued" => System.system_time(:second),
       "houses" => Directory.count(),
       "max_skew" => Auth.max_skew(),
+      "language" => Lexicon.language(),
+      "languages" => Lexicon.languages(),
       "features" => [
         "signed-records",
         "room-grants",
@@ -79,7 +81,7 @@ defmodule Junderground.Router do
     conn = Plug.Conn.fetch_query_params(conn)
     params = conn.query_params
     {:ok, dial} = Constructs.normalize(Map.take(params, Constructs.names()))
-    canonical = Lexicon.scope(dial)
+    {canonical, unknown} = Lexicon.scope_detail(dial)
     {:ok, heads} = Rooms.dial(canonical)
 
     rooms =
@@ -88,7 +90,18 @@ defmodule Junderground.Router do
       |> Enum.filter(&Admission.admitted?(&1["record"]["handle"]))
       |> Enum.map(&room_meta/1)
 
-    json(conn, 200, %{"dial" => canonical, "rooms" => rooms})
+    # `dial` is the room's identity and never changes with a language;
+    # `names` is the same scope in the administrator's words. A value the
+    # lexicon does not know comes back in `unknown` so the house can translate
+    # it before the next dial - that is how two houses of different languages
+    # find the same new room.
+    json(conn, 200, %{
+      "dial" => canonical,
+      "names" => Lexicon.names(canonical),
+      "unknown" => unknown,
+      "language" => Lexicon.language(),
+      "rooms" => rooms
+    })
   end
 
   get "/v1/rental_quote" do
@@ -735,6 +748,21 @@ defmodule Junderground.Router do
     end
   end
 
+  post "/v1/admin/language" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, _admin} <- Admin.verify(conn, raw),
+             {:ok, language} <- Lexicon.set_language(body["language"]) do
+          json(conn, 200, %{"language" => language})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
   get "/v1/admin/reviews" do
     conn = Plug.Conn.fetch_query_params(conn)
     since = int_param(conn.query_params["since"], 0)
@@ -1039,6 +1067,7 @@ defmodule Junderground.Router do
   defp status_for(:bad_grants), do: 422
   defp status_for(:bad_warranty), do: 422
   defp status_for(:bad_lexicon), do: 422
+  defp status_for(:bad_language), do: 422
 
   defp status_for(reason)
        when reason in [

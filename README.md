@@ -8,13 +8,13 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.8** — the directory, the record chain, administrator approval
+> Status: **v0.1.9** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
 > for other jundergrounds, presence and house-side relationship grading,
 > citizen/resident/guest room roles, resident passes, room tickets (bound and
 > bearer), rentals with guest windows and a fee quote, private rooms, grants,
 > revocations, TURN credentials, the room signaling WebSocket, the public feed
-> and the HTTP API are implemented and tested (92 tests). Media itself (an SFU
+> and the HTTP API are implemented and tested (96 tests). Media itself (an SFU
 > adapter and a coturn deployment) is designed but not built. See `docs/API.md` for the contract,
 > `docs/CHAT-ADMIN.md` for the administrator's screen, and the boundary below.
 

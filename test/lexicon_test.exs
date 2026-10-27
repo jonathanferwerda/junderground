@@ -56,4 +56,29 @@ defmodule Junderground.LexiconTest do
     assert {:ok, 0} = Lexicon.learn("events", "something_else", ["le_spectacle"])
     assert Lexicon.canonical("events", "le spectacle") == "rock_show"
   end
+  test "the administrator's language names the room, not its identity" do
+    assert Lexicon.language() == "en"
+    assert Lexicon.names(%{"events" => "christmas"}) == %{"events" => "Christmas"}
+
+    assert {:ok, "de"} = Lexicon.set_language("de")
+
+    assert Lexicon.names(%{"events" => "christmas", "communities" => "munich"}) ==
+             %{"events" => "Weihnachten", "communities" => "munich"}
+
+    # identity never moves with the language
+    assert Lexicon.canonical("events", "Weihnachten") == "christmas"
+    assert Lexicon.scope(%{"events" => "圣诞节"}) == %{"events" => "christmas"}
+  end
+
+  test "a value the lexicon does not know is reported, not hidden" do
+    assert {canonical, unknown} =
+             Lexicon.scope_detail(%{"events" => "Christmas", "communities" => "München"})
+
+    assert canonical == %{"events" => "christmas", "communities" => "munchen"}
+    assert unknown == %{"communities" => "München"}
+  end
+
+  test "an unknown language is refused" do
+    assert {:error, :bad_language} = Lexicon.set_language("klingon")
+  end
 end

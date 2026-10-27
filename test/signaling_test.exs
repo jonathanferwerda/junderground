@@ -61,13 +61,16 @@ defmodule Junderground.SignalingTest do
     assert hello["subject"] == "alpha"
     assert hello["room"] == "alpha/lobby"
     assert hello["ice_servers"] == []
+    assert is_binary(hello["jti"])
 
     b = connect(port, two["grant"])
     {hello_b, b} = recv_text(b)
     assert JSON.decode!(hello_b)["peers"] == 2
 
     {join, a} = recv_text(a)
-    assert JSON.decode!(join)["type"] == "join"
+    join = JSON.decode!(join)
+    assert join["type"] == "join"
+    assert join["from_jti"] == JSON.decode!(hello_b)["jti"]
 
     send_text(a, JSON.encode!(%{"type" => "offer", "sdp" => "v=0"}))
     {offer, b} = recv_text(b)

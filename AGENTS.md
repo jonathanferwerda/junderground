@@ -84,6 +84,9 @@ cowlib's current release carries an open advisory).
   `answer`, `ice` and `bye` between grants; the switch never handles media,
   never stores an SDP, and stamps `from` from the verified grant (a client's own
   `from` is dropped). The socket re-checks its grant, so a stop closes it.
+  `hello.jti` is the socket's own address, and `join`/`leave` carry it as
+  `from_jti`; a peer addresses a frame with `to`. Keep that id out of the
+  roster (it is a grant, not a person).
 ## Boundary
 
 No PSTN, no DIDs, no 911, no carrier obligations. Media is chat-room class.

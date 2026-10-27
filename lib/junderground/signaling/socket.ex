@@ -22,6 +22,7 @@ defmodule Junderground.Signaling.Socket do
     Signaling.deliver(room, %{
       "type" => "join",
       "from" => state.subject,
+      "from_jti" => state.jti,
       "subject" => state.subject,
       "at" => System.system_time(:second)
     })
@@ -30,6 +31,7 @@ defmodule Junderground.Signaling.Socket do
 
     hello = %{
       "type" => "hello",
+      "jti" => state.jti,
       "room" => room,
       "subject" => state.subject,
       "role" => state.role,
@@ -86,6 +88,7 @@ defmodule Junderground.Signaling.Socket do
     Signaling.deliver(room_key(state), %{
       "type" => "leave",
       "from" => state.subject,
+      "from_jti" => state.jti,
       "subject" => state.subject,
       "at" => System.system_time(:second)
     })

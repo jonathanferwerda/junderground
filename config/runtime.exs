@@ -4,6 +4,7 @@ if config_env() != :test do
   config :junderground,
     port: String.to_integer(System.get_env("PORT") || "4100"),
     data_dir: System.get_env("JG_DATA_DIR") || "data",
+    language: System.get_env("JG_LANGUAGE") || "en",
     public_url: System.get_env("JG_PUBLIC_URL") || "http://localhost:4100",
     grant_ttl: String.to_integer(System.get_env("JG_GRANT_TTL") || "900"),
     admin_keys: (System.get_env("JG_ADMIN_KEYS") || "") |> String.split(",", trim: true),

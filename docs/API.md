@@ -527,8 +527,9 @@ header on a WebSocket — treat it as a short-lived credential and do not log it
 Once open, the switch sends:
 
 ```json
-{"type": "hello", "room": "alpha/lobby", "subject": "alpha", "role": "citizen",
- "caps": ["join", "publish_audio", "subscribe"], "peers": 2, "ice_servers": []}
+{"type": "hello", "jti": "q2Z0m8r1oQd4xY7v", "room": "alpha/lobby", "subject": "alpha",
+ "role": "citizen", "caps": ["join", "publish_audio", "subscribe"], "peers": 2,
+ "ice_servers": []}
 ```
 
 `ice_servers` is `Turn.credentials/1` — empty until the operator sets
@@ -553,9 +554,14 @@ broadcast, and a frame over 32 KiB is refused.
 Join and leave are also announced to the room:
 
 ```json
-{"type": "join",  "from": "beta", "subject": "beta", "at": 1760000000}
-{"type": "leave", "from": "beta", "subject": "beta", "at": 1760000000}
+{"type": "join",  "from": "beta", "from_jti": "…", "subject": "beta", "at": 1760000000}
+{"type": "leave", "from": "beta", "from_jti": "…", "subject": "beta", "at": 1760000000}
 ```
+
+`hello.jti` names this socket; that is the `to` a peer uses to address a frame
+to it, and `join`/`leave` carry the same id as `from_jti`. The reference client
+builds a mesh: on a `join` the existing houses offer to the newcomer, and a
+house with no microphone still joins and receives (recvonly).
 
 Media never reaches the switch. The socket re-checks its grant every 15
 seconds; a suspension (which bumps the admission epoch) or a revocation closes
