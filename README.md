@@ -179,3 +179,7 @@ The signed bytes are the same convention jawnos already uses for crests
 6. The Chat app's Underground section, per `docs/CHAT-ADMIN.md`.
 7. The jawnos dial must adopt the partial-scope rule in `Constructs`.
 8. Rename the jawnos "citizen ticket" label to **citizen pass** in the UI.
+
+## License
+
+BSD 2-Clause. See [LICENSE](LICENSE). The same terms as jawnos.
