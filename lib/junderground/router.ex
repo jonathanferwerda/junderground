@@ -12,6 +12,7 @@ defmodule Junderground.Router do
     Auth,
     Constructs,
     Directory,
+    Lexicon,
     Peers,
     Presence,
     Rentals,
@@ -78,7 +79,8 @@ defmodule Junderground.Router do
     conn = Plug.Conn.fetch_query_params(conn)
     params = conn.query_params
     {:ok, dial} = Constructs.normalize(Map.take(params, Constructs.names()))
-    {:ok, heads} = Rooms.dial(dial)
+    canonical = Lexicon.scope(dial)
+    {:ok, heads} = Rooms.dial(canonical)
 
     rooms =
       heads
@@ -86,7 +88,7 @@ defmodule Junderground.Router do
       |> Enum.filter(&Admission.admitted?(&1["record"]["handle"]))
       |> Enum.map(&room_meta/1)
 
-    json(conn, 200, %{"dial" => dial, "rooms" => rooms})
+    json(conn, 200, %{"dial" => canonical, "rooms" => rooms})
   end
 
   get "/v1/rental_quote" do
