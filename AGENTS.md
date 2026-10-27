@@ -51,6 +51,9 @@ cowlib's current release carries an open advisory).
   under, so a suspension is instant; do not weaken that to a timestamp compare.
 - **Peers use their own record format** (`junderground-peer`) and their own
   signature header (`X-JG-Peer`). A peer is not a house and has no handle.
+- **The lexicon seed is a compatibility contract.** Two switches must agree on
+  what `christmas` is called; change the seed only with a versioned migration.
+  Room aliases are first-wins and signed; display translation is the house's.
 - **A blank construct is a wildcard.** `Constructs.normalize` must keep only
   defined values; do not reintroduce defaults into a room's scope. Room
   matching is `room_scope ⊆ dial`.

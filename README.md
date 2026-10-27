@@ -8,13 +8,13 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.5** — the directory, the record chain, administrator approval
+> Status: **v0.1.6** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
 > for other jundergrounds, presence and house-side relationship grading,
 > citizen/resident/guest room roles, resident passes, room tickets (bound and
 > bearer), rentals with guest windows and a fee quote, private rooms, grants,
 > revocations, TURN credentials, the public feed and the HTTP API are implemented
-> and tested (83 tests). The media plane (signaling, SFU, coturn deployment) is
+> and tested (89 tests). The media plane (signaling, SFU, coturn deployment) is
 > designed but not built. See `docs/API.md` for the contract,
 > `docs/CHAT-ADMIN.md` for the administrator's screen, and the boundary below.
 
@@ -116,6 +116,7 @@ The switch generates its Ed25519 identity on first boot at
 | Room tickets (bound and bearer), direct/private rooms | done |
 | Room rentals, guest windows, tickets clamped to a window | done |
 | Rental door: 5-minute notice, 1-minute close, eviction at start | done |
+| Canonical room names across languages (lexicon + room aliases) | done |
 | Citizen/resident/guest roles and free resident passes | done |
 | Switch rental fee quote and the renter's guest price | done |
 | Public feed for chaining jundergrounds | done |

@@ -49,7 +49,8 @@ defmodule Junderground.Router do
         "presence",
         "tickets",
         "rentals",
-        "passes"
+        "passes",
+        "lexicon"
       ],
       "peers" => peer_count(),
       "admission" => %{
@@ -67,6 +68,10 @@ defmodule Junderground.Router do
 
   get "/v1/constructs" do
     json(conn, 200, %{"kinds" => Constructs.kinds(), "suggestions" => Constructs.suggestions()})
+  end
+
+  get "/v1/lexicon" do
+    json(conn, 200, %{"lexicon" => Lexicon.all()})
   end
 
   get "/v1/dial" do
@@ -709,6 +714,22 @@ defmodule Junderground.Router do
     end
   end
 
+  post "/v1/admin/lexicon" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, _admin} <- Admin.verify(conn, raw),
+             :ok <- lexicon_body(body),
+             {:ok, added} <- Lexicon.learn(body["kind"], body["canonical"], body["aliases"] || []) do
+          json(conn, 200, %{"ok" => true, "added" => added})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
   get "/v1/admin/peers" do
     with {:ok, _admin} <- Admin.verify(conn, "") do
       {:ok, peers} = Peers.list()
@@ -854,6 +875,25 @@ defmodule Junderground.Router do
   defp presence_times(true, _door), do: {0, 0}
   defp presence_times(false, door), do: {door["notify_at"] || 0, door["starts_at"] || 0}
 
+  defp lexicon_body(body) do
+    cond do
+      body["kind"] not in Constructs.names() ->
+        {:error, :bad_lexicon}
+
+      not is_binary(body["canonical"]) or byte_size(body["canonical"]) > 120 ->
+        {:error, :bad_lexicon}
+
+      not is_list(body["aliases"]) or length(body["aliases"]) > 40 ->
+        {:error, :bad_lexicon}
+
+      not Enum.all?(body["aliases"], &(is_binary(&1) and byte_size(&1) <= 120)) ->
+        {:error, :bad_lexicon}
+
+      true ->
+        :ok
+    end
+  end
+
   defp ticketed?(payload) do
     payload["ticketed"] == "yes" or payload["kind"] == "ticket" or
       is_binary(payload["rental"]) or payload["role"] in ["citizen", "resident"]
@@ -955,6 +995,7 @@ defmodule Junderground.Router do
   defp status_for(:bad_role), do: 422
   defp status_for(:bad_grants), do: 422
   defp status_for(:bad_warranty), do: 422
+  defp status_for(:bad_lexicon), do: 422
 
   defp status_for(reason)
        when reason in [

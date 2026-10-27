@@ -11,6 +11,7 @@ defmodule Junderground.RoomsTest do
 
     start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
+    start_supervised!({Junderground.Lexicon, data_dir: dir})
     start_supervised!({Junderground.Rentals, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 
@@ -453,5 +454,36 @@ defmodule Junderground.RoomsTest do
 
     assert {:ok, _} = Rentals.create(rental)
     assert {:error, :door_closed} = Rooms.verify_grant(grant["grant"])
+  end
+
+  test "the same room is found from other languages", %{pub: pub, priv: priv} do
+    assert {:ok, _} =
+             Rooms.register(
+               room(pub, priv, %{
+                 "policy" => "open",
+                 "advertised" => "yes",
+                 "constructs" => %{"events" => "christmas"}
+               })
+             )
+
+    for word <- ["christmas", "圣诞节", "navidad", "weihnachten", "Χριστούγεννα"] do
+      assert {:ok, [head]} = Rooms.dial(%{"events" => word})
+      assert head["constructs"]["events"] == "christmas"
+    end
+  end
+
+  test "a room may add its own alias", %{pub: pub, priv: priv} do
+    assert {:ok, _} =
+             Rooms.register(
+               room(pub, priv, %{
+                 "policy" => "open",
+                 "advertised" => "yes",
+                 "constructs" => %{"events" => "rock_show"},
+                 "aliases" => %{"events" => ["le_spectacle"]}
+               })
+             )
+
+    assert {:ok, [head]} = Rooms.dial(%{"events" => "le_spectacle"})
+    assert head["constructs"]["events"] == "rock_show"
   end
 end

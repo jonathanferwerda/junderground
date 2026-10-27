@@ -3,9 +3,8 @@
 Status: **implemented and tested** for the directory, records, grants,
 revocations and TURN credentials. Signaling, the SFU and the coturn deployment
 are designed but not built. Everything below is what the code in `lib/` does
-today unless it is marked *planned*. **v0.1.5 adds the rental door: a five-minute
-notice, a one-minute close, and eviction of non-ticketed occupants at the
-start.**
+today unless it is marked *planned*. **v0.1.6 adds a canonical lexicon: the
+same room found from any language's word for it.**
 
 The service is headless: JSON over HTTP, no browser session, no cookie. A small
 admin UI is optional and is not part of this contract.
@@ -267,7 +266,33 @@ room of an admitted house whose scope sits inside that dial:
 ```
 
 A room that is not `advertised` is reachable by its owner and by handle, but
-does not appear on the dial. The Mail app's `mail_channel_key` fills missing
+does not appear on the dial.
+
+### Canonical names
+
+A room's values are **canonical slugs**. The switch ships a small shared seed
+(`events`: `christmas`, `new_year`, `halloween`) with aliases in the core
+languages, served by `GET /v1/lexicon`. A dial is canonicalized before it is
+matched, so all of these name the same room:
+
+```
+events=christmas   events=圣诞节   events=navidad
+events=weihnachten events=Χριστούγεννα
+```
+
+A room may add aliases in its signed record:
+
+```json
+"aliases": {"events": ["le_spectacle", "rock_show"]}
+```
+
+They are learned at registration (first wins; an alias already mapped to another
+canonical is refused). An administrator can add more with
+`POST /v1/admin/lexicon` (`{"kind","canonical","aliases"}`).
+
+Display names and in-room translation stay with the house's Guide: the switch
+decides *identity*, not *language*. A Mandarin speaker and an English speaker
+land in the same Christmas room and each can read it in their own language. The Mail app's `mail_channel_key` fills missing
 constructs with defaults and therefore names different rooms; jawnos' dial must
 adopt this partial-scope rule for the two sides to agree.
 
@@ -869,6 +894,8 @@ The agent's own record of a review, separate from a status change:
 | `bad_guest_window` | 422 | the guest window is not inside the rental |
 | `bad_role` / `bad_grants` / `bad_warranty` | 422 | malformed pass or ticket |
 | `bad_scope` / `bad_citizen` / `bad_fee` / `bad_currency` | 422 | malformed rental or quote |
+| `bad_aliases` | 422 | malformed room alias list |
+| `bad_lexicon` | 422 | malformed lexicon addition |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation

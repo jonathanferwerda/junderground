@@ -12,6 +12,7 @@ defmodule Junderground.HttpTest do
     start_supervised!(Nonces)
     start_supervised!({Admission, data_dir: dir})
     start_supervised!({Directory, data_dir: dir})
+    start_supervised!({Junderground.Lexicon, data_dir: dir})
     start_supervised!({Junderground.Rentals, data_dir: dir})
     start_supervised!({Rooms, data_dir: dir})
 

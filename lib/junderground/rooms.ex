@@ -17,6 +17,7 @@ defmodule Junderground.Rooms do
     Constructs,
     Directory,
     Keys,
+    Lexicon,
     Rentals,
     ServerKey,
     Token,
@@ -52,6 +53,7 @@ defmodule Junderground.Rooms do
         "issued" => System.system_time(:second),
         "name" => room,
         "constructs" => %{},
+        "aliases" => %{},
         "advertised" => "no",
         "members" => [],
         "policy" => "invite",
@@ -155,10 +157,11 @@ defmodule Junderground.Rooms do
 
   def handle_call({:dial, scope}, _from, state) do
     heads = :dets.select(@table, [{{{:room, :_, :_}, :"$1"}, [], [:"$1"]}])
+    canonical = Lexicon.scope(scope)
 
     open =
       Enum.filter(heads, fn head ->
-        not head["tombstoned"] and Constructs.matches?(head["constructs"], scope)
+        not head["tombstoned"] and Constructs.matches?(head["constructs"], canonical)
       end)
 
     {:reply, {:ok, open}, state}
@@ -436,6 +439,9 @@ defmodule Junderground.Rooms do
       not valid_constructs?(record["constructs"]) ->
         {:error, :bad_constructs}
 
+      not valid_aliases?(record["aliases"]) ->
+        {:error, :bad_aliases}
+
       record["advertised"] not in ["yes", "no"] ->
         {:error, :bad_advertised}
 
@@ -459,6 +465,17 @@ defmodule Junderground.Rooms do
   end
 
   defp valid_constructs?(value), do: match?({:ok, _}, Constructs.normalize(value))
+
+  defp valid_aliases?(nil), do: true
+
+  defp valid_aliases?(map) when is_map(map) do
+    Enum.all?(map, fn {kind, list} ->
+      is_binary(kind) and kind in Constructs.names() and is_list(list) and length(list) <= 20 and
+        Enum.all?(list, &(is_binary(&1) and byte_size(&1) <= 120))
+    end)
+  end
+
+  defp valid_aliases?(_map), do: false
 
   # A new room needs an approved house; editing an existing one is allowed
   # while pending or on probation, but not after a stop.
@@ -1000,7 +1017,13 @@ defmodule Junderground.Rooms do
 
   defp put(record) do
     sig = record["sig"]
-    {:ok, constructs} = Constructs.normalize(record["constructs"])
+    {:ok, raw} = Constructs.normalize(record["constructs"])
+    constructs = Lexicon.scope(raw)
+    aliases = record["aliases"] || %{}
+
+    Enum.each(constructs, fn {kind, canonical} ->
+      Lexicon.learn(kind, canonical, Map.get(aliases, kind) || [])
+    end)
 
     head = %{
       "seq" => record["seq"],
@@ -1009,6 +1032,7 @@ defmodule Junderground.Rooms do
       "tombstoned" => record["kind"] == "tombstone",
       "room_key" => Canonical.sha256_hex(sig),
       "constructs" => constructs,
+      "aliases" => aliases,
       "scope" => Constructs.scope_id(constructs),
       "advertised" => record["advertised"] == "yes",
       "record" => record
