@@ -62,6 +62,7 @@ defmodule Junderground.SignalingTest do
     assert hello["room"] == "alpha/lobby"
     assert hello["ice_servers"] == []
     assert is_binary(hello["jti"])
+    assert hello["media"] == %{"mode" => "mesh", "reason" => "below_threshold"}
 
     b = connect(port, two["grant"])
     {hello_b, b} = recv_text(b)

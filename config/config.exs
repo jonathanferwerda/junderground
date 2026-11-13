@@ -19,6 +19,8 @@ config :junderground,
   turn_secret: nil,
   sfu_url: nil,
   sfu_key: nil,
-  sfu_secret: nil
+  sfu_secret: nil,
+  sfu_threshold: 5,
+  sfu_token_ttl: 300
 
 import_config "#{config_env()}.exs"

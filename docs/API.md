@@ -529,7 +529,7 @@ Once open, the switch sends:
 ```json
 {"type": "hello", "jti": "q2Z0m8r1oQd4xY7v", "room": "alpha/lobby", "subject": "alpha",
  "role": "citizen", "caps": ["join", "publish_audio", "subscribe"], "peers": 2,
- "ice_servers": []}
+ "ice_servers": [], "media": {"mode": "mesh", "reason": "below_threshold"}}
 ```
 
 `ice_servers` is `Turn.credentials/1` — empty until the operator sets
@@ -586,11 +586,83 @@ to it, and `join`/`leave` carry the same id as `from_jti`. The reference client
 builds a mesh: on a `join` the existing houses offer to the newcomer, and a
 house with no microphone still joins and receives (recvonly).
 
+`hello.media` says how the room should carry media. `mode` is `mesh` or
+`sfu`; `reason` explains a `mesh` verdict (`below_threshold`, `room_max`,
+`sfu_unconfigured`, `sfu_unavailable`). A client that sees `sfu` requests a
+token from §4i and connects to the media server; a `mesh` client keeps the
+peer-to-peer path it already builds. `POST …/token` carries the same object.
+
 Media never reaches the switch. The socket re-checks its grant every 15
 seconds; a suspension (which bumps the admission epoch) or a revocation closes
 the channel without a client message. Presence stays the HTTP roster — a socket
 is not a roster entry, and a joined house should still heartbeat `…/presence`
 so the room's `GET` sees it.
+
+## 4i. SFU media plane
+
+At `sfu_threshold` live sockets (five by default) a room stops being a mesh and
+becomes a LiveKit room. The switch remains the control plane: it verifies the
+`JG1` grant exactly as the socket does, then mints a short HS256 join token.
+The media server never sees a grant, a handle, a role, a pass or the house's
+relationship map.
+
+```
+POST /v1/rooms/:handle/:room/sfu/token     {"grant": "JG1…"}
+```
+
+House-signed like `POST …/token`. The request must come from the grant's `sub`
+and the grant must name this room and carry `join`, so a house cannot upgrade
+another house's grant. The response at or above the threshold:
+
+```json
+{"mode": "sfu", "url": "wss://sfu.example", "room": "r_9m2c4xQ1pL7aZ0b",
+ "token": "<HS256 JWT>", "expires": 1760000300,
+ "ice_servers": [], "peers": 6}
+```
+
+`room` is opaque: `r_` plus the first 16 base64url characters of
+HMAC-SHA256(`JG_SFU_SECRET`, `"room\0" <> room_key`). It is stable for the
+room, identical for every house in it, and cannot be turned back into a handle.
+The token's `sub` is the grant's `jti`, never a handle. The JWT lives at most
+`min(grant.exp, now + JG_SFU_TOKEN_TTL)` (300 s by default); LiveKit checks it
+at join, so the short life is not a session kill.
+
+The video grant follows the room role:
+
+| Grant role | Publish | `canSubscribe` | `roomAdmin` |
+| --- | --- | --- | --- |
+| `citizen` | audio + video | yes | true |
+| `resident` | audio + video | yes | false |
+| `guest` | audio only, plus camera only when the grant carries `publish_video` | yes | false |
+
+Every role gets `roomJoin: true`, `roomCreate: false`, `roomRecord: false` and
+`canPublishData: false`; signaling stays on the switch and recording is out of
+scope. Capabilities are also checked: a `join`-only grant cannot publish.
+
+Below the threshold the same endpoint answers `200` with the mesh path, so a
+client may call it always:
+
+```json
+{"mode": "mesh", "room": "alpha/lobby", "peers": 3, "ice_servers": [],
+ "media": {"mode": "mesh", "reason": "below_threshold"}}
+```
+
+A room whose record `max` is below the threshold never becomes SFU. At or over
+`max` the endpoint refuses with `409 room_full`. When the room is at the mesh
+ceiling but the SFU is unconfigured or unhealthy, it answers
+`503 sfu_unavailable` with `Retry-After: 30` — not a silent oversized mesh.
+
+```
+POST /v1/rooms/:handle/:room/sfu/revoke    {"jti": "q2Z0m8r1oQd4xY7v"}
+```
+
+Owner-only. The grant is revoked at the switch (its signaling socket closes and
+it cannot mint another token), and the participant is removed from the SFU best
+effort. The response is `{"ok": true, "jti": "…", "removed": true}`; `removed`
+is `false` when no SFU is configured or the call failed. `Sfu.Reconciler` also
+re-checks every connected identity every 30 seconds against the grant, its
+admission epoch, revocation and the rental door, so a stop closes a WebSocket
+within 15 s and removes an SFU participant in about 30 s.
 
 ## 5. Signed requests
 
@@ -621,7 +693,9 @@ Rules:
 - registration (`POST /v1/houses`) needs no request signature — the record is
   itself signed, and this is where a house first announces its key;
 - administrator requests use the same message and headers, but send
-  `X-JG-Admin: <public key>` instead of `X-JG-Handle`.
+  `X-JG-Admin: <public key>` instead of `X-JG-Handle`;
+- `POST …/sfu/token` and `POST …/sfu/revoke` are ordinary house-signed writes;
+  for the token route the requester must equal the grant's `sub`.
 
 ## 6. Endpoints
 
@@ -639,15 +713,21 @@ All responses are JSON. Errors are `{"error":{"code":"…"}}`.
   "houses": 12,
   "max_skew": 300,
   "features": ["signed-records", "room-grants", "turn-credentials", "admission",
-               "crest", "constructs", "peers", "presence", "tickets", "rentals"],
+               "crest", "constructs", "peers", "presence", "tickets", "rentals",
+               "sfu"],
   "peers": 3,
   "admission": {"requires_approval": true, "statuses": ["pending", "approved", "probation", "suspended", "rejected", "banned"], "admins": 1},
   "constructs": {"communities": "local", "clubs": "peers", "…": "…"},
-  "turn": {"urls": ["turn:turn.thejunderground.example:3478"], "ttl": 600}
+  "turn": {"urls": ["turn:turn.thejunderground.example:3478"], "ttl": 600},
+  "sfu": {"available": true, "adapter": "livekit", "url": "wss://sfu.example",
+          "threshold": 5, "token_ttl": 300}
 }
 ```
 
 Clients pin the `pubkey` (or the `public_url`) and verify grants with it.
+`sfu.available` is the cached health answer; `"sfu"` is added to `features`
+only while it is true. The block is always present so a client can tell
+"unconfigured" (`url: null`) from "configured but down".
 
 ### `POST /v1/houses`
 
@@ -738,7 +818,8 @@ Response:
       "credential": "…",
       "expires": 1760000600
     }
-  ]
+  ],
+  "media": {"mode": "mesh", "reason": "below_threshold"}
 }
 ```
 
@@ -754,6 +835,31 @@ Signed request by the room's owner:
 ```
 
 The `jti` stops verifying immediately and is forgotten after `expires`.
+
+### `POST /v1/rooms/:handle/:room/sfu/token`
+
+Signed request:
+
+```json
+{"grant": "JG1.eyJ…uY2x…"}
+```
+
+See §4i. `200` with `mode: "sfu"` and a join token, or `200` with
+`mode: "mesh"`; `403` when the grant is for another room or subject; the
+grant's own status when it is expired/revoked/closed; `409 room_full`; `503`
+with `Retry-After: 30` when the room is at the mesh ceiling and no SFU is
+usable.
+
+### `POST /v1/rooms/:handle/:room/sfu/revoke`
+
+Signed request by the room's owner:
+
+```json
+{"jti": "q2Z0m8r1oQd4xY7v"}
+```
+
+Revokes the grant and best-effort removes that participant from the SFU.
+`{"ok": true, "jti": "…", "removed": true}`; `403` for anyone but the owner.
 
 ### `GET /v1/rooms/:handle/:room/ws?grant=…`
 
@@ -984,6 +1090,8 @@ The agent's own record of a review, separate from a status change:
 | `bad_scope` / `bad_citizen` / `bad_fee` / `bad_currency` | 422 | malformed rental or quote |
 | `bad_aliases` | 422 | malformed room alias list |
 | `bad_lexicon` | 422 | malformed lexicon addition |
+| `room_full` | 409 | the live socket count is at the room's `max` |
+| `sfu_unavailable` | 503 | the room needs an SFU but none is configured or healthy |
 | `bad_*` | 422 | malformed field |
 
 ## 11. Federation
@@ -1016,22 +1124,24 @@ them. There is no consensus and no authoritative server; a client prefers the
 newest room head and verifies the chain. The media plane scales separately from
 the feed (SFU regions and CDN caches for the read side).
 
-## 12. Media plane (planned)
+## 12. Media plane
 
-Not implemented here; the contract above is what it will consume.
+The control plane is implemented; the media server and coturn are deployed by
+the operator (`docs/SFU.md`).
 
 - **Signaling** — a WebSocket channel per room. Join with a grant; the channel
   verifies the grant's signature, expiry, `jti` and `room_key`, then relays
-  SDP/ICE. A grant is the only credential needed.
+  SDP/ICE. A grant is the only credential needed. This is the mesh path.
 - **NAT traversal** — each participant negotiates with the room's SFU, so one
   ICE negotiation per person rather than one per pair. Direct host/STUN
   candidates are the common case; TURN is the fallback for CGNAT, symmetric NAT
   and corporate firewalls. A tailnet only helps devices in the *same* house; it
   is an optimization, not a replacement for TURN across houses.
-- **SFU** — a separate process (LiveKit is the working favourite; Jitsi or Janus
-  are alternatives). It validates the grant or receives a short-lived
-  server-minted token from this service, and it is the thing that actually
-  forwards audio. Do not put media in the Elixir node.
+- **SFU** — a separate LiveKit process. The switch mints a short joined token
+  (§4i), keeps the opaque-room map local, probes health every 30 s and
+  reconciles connected participants every 30 s. Media never enters the Elixir
+  node. An SFU restart is a media gap, not a signaling outage. SRTP terminates
+  at the SFU, so an SFU call is not end-to-end encrypted.
 - **The answering bot** — a room participant, not a phone hack. When a call is
   not answered, the house's flow engine joins the room, greets, runs the
   conversation, files a transcript, and can invite the person in. On the PSTN

@@ -20,6 +20,7 @@ defmodule Junderground.Rooms do
     Lexicon,
     Rentals,
     ServerKey,
+    Sfu,
     Token,
     Turn
   }
@@ -81,6 +82,16 @@ defmodule Junderground.Rooms do
 
   def verify_grant(token), do: GenServer.call(__MODULE__, {:verify_grant, token})
   def revoked?(jti), do: GenServer.call(__MODULE__, {:revoked?, jti})
+
+  @doc """
+  Re-check a grant payload whose signature was verified when it was minted.
+
+  The SFU reconciler stores the payload at token mint and re-runs the live
+  checks here every 30 seconds: the room still exists, the grant has not
+  expired, its `jti` was not revoked, its admission epoch is current, its
+  subject is not suspended, and the rental door still admits it.
+  """
+  def recheck(payload), do: GenServer.call(__MODULE__, {:recheck, payload})
   def caps, do: @caps
 
   # ---- server --------------------------------------------------------------
@@ -231,7 +242,8 @@ defmodule Junderground.Rooms do
            "ticketed" => ticketed,
            "caps" => caps,
            "expires" => expires,
-           "ice_servers" => Turn.credentials(requester.handle, max(expires - now, 0))
+           "ice_servers" => Turn.credentials(requester.handle, max(expires - now, 0)),
+           "media" => Sfu.media(head["record"], Sfu.peer_count(handle <> "/" <> room))
          }}
       end
 
@@ -258,6 +270,10 @@ defmodule Junderground.Rooms do
 
   def handle_call({:revoked?, jti}, _from, state) do
     {:reply, revoked_now?(jti), state}
+  end
+
+  def handle_call({:recheck, payload}, _from, state) do
+    {:reply, recheck_payload(payload), state}
   end
 
   def handle_call({:issue_ticket, handle, room, requester, body}, _from, state) do
@@ -654,6 +670,45 @@ defmodule Junderground.Rooms do
       end
     end
   end
+
+  defp recheck_payload(payload) when is_map(payload) do
+    now = System.system_time(:second)
+
+    with {:ok, handle, room} <- grant_room_parts(payload),
+         {:ok, head} <- fetch(handle, room),
+         :ok <- room_state(head) do
+      cond do
+        not is_binary(payload["jti"]) ->
+          {:error, :bad_grant}
+
+        not is_integer(payload["exp"]) or payload["exp"] <= now ->
+          {:error, :expired}
+
+        revoked_now?(payload["jti"]) ->
+          {:error, :revoked}
+
+        stale_epoch?(payload) ->
+          {:error, :revoked}
+
+        suspended_subject?(payload["sub"]) ->
+          {:error, :revoked}
+
+        true ->
+          door_allows?(payload)
+      end
+    end
+  end
+
+  defp recheck_payload(_payload), do: {:error, :bad_grant}
+
+  defp grant_room_parts(%{"room" => room}) when is_binary(room) do
+    case String.split(room, "/", parts: 2) do
+      [handle, name] when handle != "" and name != "" -> {:ok, handle, name}
+      _ -> {:error, :bad_grant}
+    end
+  end
+
+  defp grant_room_parts(_payload), do: {:error, :bad_grant}
 
   defp revoked_now?(jti) when is_binary(jti) do
     now = System.system_time(:second)

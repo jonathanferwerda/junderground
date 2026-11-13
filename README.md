@@ -8,15 +8,18 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.10** — the directory, the record chain, administrator approval
+> Status: **v0.1.14** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
 > for other jundergrounds, presence and house-side relationship grading,
 > citizen/resident/guest room roles, resident passes, room tickets (bound and
 > bearer), rentals with guest windows and a fee quote, private rooms, grants,
-> revocations, TURN credentials, the room signaling WebSocket, the public feed
-> and the HTTP API are implemented and tested (96 tests). Media itself (an SFU
-> adapter and a coturn deployment) is designed but not built. See `docs/API.md` for the contract,
-> `docs/CHAT-ADMIN.md` for the administrator's screen, and the boundary below.
+> revocations, TURN credentials, the room signaling WebSocket, the public feed,
+> the HTTP API and the **SFU control plane** (LiveKit join tokens, health cache,
+> revocation and a 30-second reconciler) are implemented and tested (114 tests).
+> Media still never enters the Elixir process; a LiveKit and coturn deployment
+> is the operator's next step, not part of this repository. See `docs/SFU.md`
+> for the media design, `docs/API.md` for the contract, `docs/CHAT-ADMIN.md` for
+> the administrator's screen, and the boundary below.
 
 ## Why it exists
 
@@ -100,7 +103,11 @@ The switch generates its Ed25519 identity on first boot at
 | `JG_AUTO_APPROVE` | off | `1` approves every registration (development only) |
 | `JG_TURN_URLS` | empty | Comma-separated coturn URLs |
 | `JG_TURN_SECRET` | none | coturn `use-auth-secret` shared secret |
-| `JG_SFU_URL` / `JG_SFU_KEY` / `JG_SFU_SECRET` | none | Reserved for the media plane |
+| `JG_SFU_URL` | none | Public `wss://` base for LiveKit; a path is kept (`wss://host/sfu`) |
+| `JG_SFU_KEY` | none | LiveKit API key, also the JWT `iss` |
+| `JG_SFU_SECRET` | none | LiveKit API secret; also names the opaque room |
+| `JG_SFU_THRESHOLD` | `5` | Live sockets at which a room becomes `sfu` |
+| `JG_SFU_TOKEN_TTL` | `300` | Join-token lifetime ceiling, seconds |
 
 ## What works / what does not
 
@@ -128,8 +135,9 @@ The switch generates its Ed25519 identity on first boot at
 | Rooms keyed by the Mail app's construct dial | done |
 | Room records, admission policy, grants, revocation | done |
 | Time-limited TURN credentials | done |
+| SFU token adapter (LiveKit), health cache, revocation reconciler | done |
 | TLS, rate limiting, metrics | not yet (run behind a proxy) |
-| Signaling (WebSocket), SFU, coturn deployment | designed, not built |
+| LiveKit and coturn deployment, media tests against a real server | not yet (operator step) |
 | PSTN, DID, 911, recording of phone calls | out of scope |
 
 ## Layout
@@ -150,6 +158,12 @@ lib/junderground/
   admin.ex       administrator (or approval agent) signed requests
   token.ex       JG1 capability tokens
   turn.ex        coturn credentials
+  sfu.ex         mesh/SFU decision and the opaque room name
+  sfu/token.ex  LiveKit HS256 join tokens
+  sfu/health.ex the cached 30-second probe
+  sfu/client.ex RemoveParticipant / ListParticipants over Twirp
+  sfu/local.ex  the private grant and opaque-room map (data/sfu.dets)
+  sfu/reconciler.ex  the 30-second participant sweep
   auth.ex        signed-request verification
   server_key.ex  the switch's own identity
   router.ex      the /v1 HTTP surface
@@ -173,7 +187,8 @@ The signed bytes are the same convention jawnos already uses for crests
 1. TLS in front of the listener and per-house rate limits.
 2. Signaling: a WebSocket room channel, ICE config from the grant.
 3. coturn deployment and the TURN fallback path.
-4. An SFU adapter (LiveKit is the current favourite) and media tests.
+4. Deploy LiveKit and coturn, then exercise the SFU path with a real media
+   server (the adapter and its control plane are built).
 5. The jawnos client: verify a record, dial by construct, grade the roster,
    join a room, and let the call bot be a room participant.
 6. The Chat app's Underground section, per `docs/CHAT-ADMIN.md`.

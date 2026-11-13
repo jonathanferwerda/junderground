@@ -16,7 +16,9 @@ defmodule Junderground.Router do
     Peers,
     Presence,
     Rentals,
-    Rooms
+    Rooms,
+    Sfu,
+    Turn
   }
 
   plug(Plug.RequestId)
@@ -31,6 +33,8 @@ defmodule Junderground.Router do
   # ---- meta and the dial ------------------------------------------------
 
   get "/v1/meta" do
+    sfu_available = Sfu.available?()
+
     json(conn, 200, %{
       "name" => "junderground",
       "version" => Junderground.version(),
@@ -41,20 +45,21 @@ defmodule Junderground.Router do
       "max_skew" => Auth.max_skew(),
       "language" => Lexicon.language(),
       "languages" => Lexicon.languages(),
-      "features" => [
-        "signed-records",
-        "room-grants",
-        "turn-credentials",
-        "admission",
-        "crest",
-        "constructs",
-        "peers",
-        "presence",
-        "tickets",
-        "rentals",
-        "passes",
-        "lexicon"
-      ],
+      "features" =>
+        [
+          "signed-records",
+          "room-grants",
+          "turn-credentials",
+          "admission",
+          "crest",
+          "constructs",
+          "peers",
+          "presence",
+          "tickets",
+          "rentals",
+          "passes",
+          "lexicon"
+        ] ++ if(sfu_available, do: ["sfu"], else: []),
       "peers" => peer_count(),
       "admission" => %{
         "requires_approval" => not Application.get_env(:junderground, :auto_approve, false),
@@ -65,7 +70,8 @@ defmodule Junderground.Router do
       "turn" => %{
         "urls" => Application.get_env(:junderground, :turn_urls, []),
         "ttl" => 600
-      }
+      },
+      "sfu" => Sfu.meta(sfu_available)
     })
   end
 
@@ -421,6 +427,53 @@ defmodule Junderground.Router do
         with {:ok, requester} <- Auth.verify(conn, raw),
              :ok <- Rooms.revoke(handle, room, requester, body["jti"], body["expires"]) do
           json(conn, 200, %{"ok" => true, "jti" => body["jti"]})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  # The control plane decides whether this room is a mesh or an SFU. The grant
+  # is verified exactly as the socket verifies it, and the token's subject is
+  # the grant's jti, never a handle. No SFU configured still answers 200 mesh
+  # so a client can call this always; a threshold-sized room with no usable
+  # SFU answers 503 rather than silently building a mesh that cannot carry it.
+  post "/v1/rooms/:handle/:room/sfu/token" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             {:ok, grant} <- Rooms.verify_grant(body["grant"]),
+             :ok <- grant_room(grant, handle, room),
+             :ok <- grant_join(grant),
+             :ok <- grant_subject(grant, requester) do
+          sfu_token(conn, handle, room, grant)
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  # Owner-only. The grant is revoked at the switch (so its socket closes and it
+  # cannot be used again) and the participant is removed from the SFU best
+  # effort. The token's own five-minute ceiling is the backstop.
+  post "/v1/rooms/:handle/:room/sfu/revoke" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             {:ok, head} <- Rooms.latest(handle, room),
+             :ok <- room_owner(head, requester),
+             :ok <- Rooms.revoke(handle, room, requester, body["jti"], nil) do
+          json(conn, 200, %{
+            "ok" => true,
+            "jti" => body["jti"],
+            "removed" => remove_sfu_participant(head, body["jti"])
+          })
         else
           {:error, reason} -> fail(conn, reason)
         end
@@ -848,6 +901,97 @@ defmodule Junderground.Router do
 
   # ---- helpers ----------------------------------------------------------
 
+  defp sfu_token(conn, handle, room, grant) do
+    with {:ok, head} <- Rooms.latest(handle, room) do
+      record = head["record"]
+      max = record["max"] || 16
+      peers = Sfu.peer_count(handle <> "/" <> room)
+      now = System.system_time(:second)
+
+      cond do
+        is_integer(max) and peers >= max ->
+          fail(conn, :room_full)
+
+        Sfu.mode(record, peers) == "sfu" ->
+          if Sfu.available?() do
+            case Junderground.Sfu.Token.mint(grant) do
+              {:ok, minted} ->
+                remember_sfu_grant(grant, minted)
+
+                json(conn, 200, %{
+                  "mode" => "sfu",
+                  "url" => Sfu.url(),
+                  "room" => minted.room,
+                  "token" => minted.token,
+                  "expires" => minted.expires,
+                  "ice_servers" => Turn.credentials(grant["sub"], max(minted.expires - now, 0)),
+                  "peers" => peers
+                })
+
+              {:error, reason} ->
+                fail(conn, reason)
+            end
+          else
+            conn
+            |> Plug.Conn.put_resp_header("retry-after", "30")
+            |> json(503, %{"error" => %{"code" => "sfu_unavailable"}})
+          end
+
+        true ->
+          json(conn, 200, %{
+            "mode" => "mesh",
+            "room" => handle <> "/" <> room,
+            "peers" => peers,
+            "ice_servers" => Turn.credentials(grant["sub"], max((grant["exp"] || now) - now, 0)),
+            "media" => Sfu.media(record, peers)
+          })
+      end
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  defp remember_sfu_grant(grant, minted) do
+    entry =
+      Map.take(grant, [
+        "jti",
+        "room",
+        "room_key",
+        "exp",
+        "epoch",
+        "role",
+        "caps",
+        "sub",
+        "ticketed",
+        "rental",
+        "kind"
+      ])
+      |> Map.put("opaque", minted.room)
+
+    if Process.whereis(Junderground.Sfu.Local) do
+      Junderground.Sfu.Local.remember(entry)
+    else
+      # The bookkeeping process is started by the application; a switch running
+      # without it still mints tokens, but the reconciler cannot see them.
+      :ok
+    end
+  end
+
+  defp room_owner(%{"record" => %{"handle" => handle}}, %{handle: handle}), do: :ok
+  defp room_owner(_head, _requester), do: {:error, :forbidden}
+
+  defp remove_sfu_participant(head, jti) when is_binary(jti) do
+    if Sfu.enabled?() do
+      Sfu.Client.remove_participant(Sfu.opaque_room(head["room_key"]), jti) == :ok
+    else
+      false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp remove_sfu_participant(_head, _jti), do: false
+
   defp viewer(conn) do
     case Auth.verify(conn, "") do
       {:ok, requester} -> requester
@@ -1027,6 +1171,7 @@ defmodule Junderground.Router do
   end
 
   defp status_for(:not_found), do: 404
+  defp status_for(:room_full), do: 409
   defp status_for(:unknown_house), do: 404
   defp status_for(:missing_auth), do: 401
   defp status_for(:stale_timestamp), do: 401

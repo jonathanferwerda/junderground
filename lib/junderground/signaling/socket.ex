@@ -37,7 +37,8 @@ defmodule Junderground.Signaling.Socket do
       "role" => state.role,
       "caps" => state.caps,
       "peers" => Signaling.count(room),
-      "ice_servers" => Turn.credentials(state.subject)
+      "ice_servers" => Turn.credentials(state.subject),
+      "media" => Junderground.Sfu.media(state.handle, state.room)
     }
 
     {:push, {:text, JSON.encode!(hello)}, state}

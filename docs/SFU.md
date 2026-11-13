@@ -1,6 +1,30 @@
 # SFU design
 
-Status: design. The switch is the control plane; media never enters the Elixir process.
+Status: implemented in v0.1.14 (the switch side). The switch is the control
+plane; media never enters the Elixir process. Deploying LiveKit and coturn is
+an operator step, not part of this repository.
+
+Implementation notes and deviations from this document:
+
+- **The HTTP base keeps its path.** `JG_SFU_URL` may be
+  `wss://thejunderground.com/sfu`; the switch changes only the scheme (to
+  `https://`) and appends `/` for the health probe and
+  `/twirp/livekit.RoomService/…` for the client. It does not assume a `sfu.`
+  hostname and does not strip the path; the TLS proxy strips `/sfu` on its way
+  to LiveKit's `127.0.0.1:7880`.
+- **The local map records grants at mint.** A `JG1` grant is stateless, so a
+  reconciler cannot re-check live grants by `jti` alone. `Sfu.Local` stores the
+  verified payload (jti, room key, room, exp, epoch, role, caps, subject) and
+  the opaque-to-room map in `data/sfu.dets`; `Rooms.recheck/1` supplies the
+  epoch, revocation, suspension and door checks.
+- **`/sfu/revoke` also revokes the grant at the switch.** Besides the
+  best-effort `RemoveParticipant`, it inserts the ordinary `jti` revocation, so
+  the socket closes and the grant cannot mint another token. The SFU token
+  route enforces the room's `max`; the older mesh `…/token` route still does
+  not.
+- **The join token is cap-aware.** A role that normally publishes can only do
+  so when the grant carries `publish_audio` or `publish_video`; `subscribe` is
+  required for `canSubscribe`. `roomAdmin` stays role-based (`citizen` only).
 
 ## 1. When the mesh stops being enough
 
@@ -121,7 +145,7 @@ Environment, read in `config/runtime.exs`:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `JG_SFU_URL` | unset | Public `wss://` base; unset means no SFU |
+| `JG_SFU_URL` | unset | Public `wss://` base; a path is kept; unset means no SFU |
 | `JG_SFU_KEY` | unset | LiveKit API key, equals `iss` in the JWT |
 | `JG_SFU_SECRET` | unset | LiveKit API secret, 32+ bytes; also names the opaque room |
 | `JG_SFU_THRESHOLD` | `5` | Room size at which the mode becomes `sfu` |
@@ -163,6 +187,9 @@ An SFU restart is a media gap, not a signaling outage: the control plane is not
 in the media path.
 
 ## 6. Implementation plan
+
+All eight steps below are implemented in v0.1.14. The tests named at the end of
+this section run without LiveKit or coturn; the transports are injectable.
 
 1. `config/config.exs`, `config/runtime.exs`: add `sfu_threshold: 5` and
    `sfu_token_ttl: 300` with their `JG_SFU_*` reads; the existing keys stay.

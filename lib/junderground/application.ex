@@ -16,6 +16,9 @@ defmodule Junderground.Application do
           {Junderground.Peers, []},
           Junderground.Presence,
           Junderground.Signaling,
+          {Junderground.Sfu.Local, []},
+          {Junderground.Sfu.Health, []},
+          {Junderground.Sfu.Reconciler, []},
           {Bandit,
            plug: Junderground.Router, port: Application.get_env(:junderground, :port, 4100)}
         ]

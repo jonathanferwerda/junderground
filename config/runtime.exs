@@ -20,5 +20,7 @@ if config_env() != :test do
     turn_secret: System.get_env("JG_TURN_SECRET"),
     sfu_url: System.get_env("JG_SFU_URL"),
     sfu_key: System.get_env("JG_SFU_KEY"),
-    sfu_secret: System.get_env("JG_SFU_SECRET")
+    sfu_secret: System.get_env("JG_SFU_SECRET"),
+    sfu_threshold: String.to_integer(System.get_env("JG_SFU_THRESHOLD") || "5"),
+    sfu_token_ttl: String.to_integer(System.get_env("JG_SFU_TOKEN_TTL") || "300")
 end
