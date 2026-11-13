@@ -78,7 +78,7 @@ defmodule Junderground.Sfu.Health do
     {_result, state} = run(state)
     publish(state)
     Process.send_after(self(), :probe, state.interval)
-    {:ok, state}
+    {:noreply, state}
   end
 
   # The cache lives in persistent_term so a token request reads it directly and

@@ -79,6 +79,6 @@ defmodule Junderground.Sfu.Reconciler do
   def handle_info(:sweep, state) do
     sweep()
     Process.send_after(self(), :sweep, state.interval)
-    {:ok, state}
+    {:noreply, state}
   end
 end

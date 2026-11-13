@@ -345,4 +345,26 @@ defmodule Junderground.SfuHttpTest do
     assert conn.status == 403
     assert {:ok, _} = Rooms.verify_grant(grant["grant"])
   end
+
+  test "the health process survives :probe and trips the three-failure threshold" do
+    configure_sfu()
+    start_health()
+    health = Process.whereis(Health)
+
+    :persistent_term.put(:jg_sfu_probe_down, true)
+    for _ <- 1..3, do: send(health, :probe)
+    _state = :sys.get_state(health)
+
+    assert Process.alive?(health)
+    assert Health.status().up == false
+    assert Health.status().failures == 3
+
+    :persistent_term.put(:jg_sfu_probe_down, false)
+    send(health, :probe)
+    _state = :sys.get_state(health)
+
+    assert Process.alive?(health)
+    assert Health.status().up == true
+    assert Health.status().failures == 0
+  end
 end

@@ -8,14 +8,14 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.14** — the directory, the record chain, administrator approval
+> Status: **v0.1.15** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
 > for other jundergrounds, presence and house-side relationship grading,
 > citizen/resident/guest room roles, resident passes, room tickets (bound and
 > bearer), rentals with guest windows and a fee quote, private rooms, grants,
 > revocations, TURN credentials, the room signaling WebSocket, the public feed,
 > the HTTP API and the **SFU control plane** (LiveKit join tokens, health cache,
-> revocation and a 30-second reconciler) are implemented and tested (114 tests).
+> revocation and a 30-second reconciler) are implemented and tested (116 tests).
 > Media still never enters the Elixir process; a LiveKit and coturn deployment
 > is the operator's next step, not part of this repository. See `docs/SFU.md`
 > for the media design, `docs/API.md` for the contract, `docs/CHAT-ADMIN.md` for

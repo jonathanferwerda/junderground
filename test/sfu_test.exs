@@ -317,4 +317,37 @@ defmodule Junderground.SfuTest do
     assert Local.grants() == []
     assert Local.rooms() == []
   end
+
+  test "the reconciler process survives :sweep and calls the room service" do
+    configure_sfu()
+
+    row = grant(%{"room_key" => String.duplicate("d", 64)})
+    opaque = Sfu.opaque_room(row["room_key"])
+    assert :ok = Local.remember(Map.put(row, "opaque", opaque))
+
+    test_pid = self()
+
+    Application.put_env(:junderground, :sfu_transport, fn url, _headers, _body ->
+      send(test_pid, {:twirp, url})
+
+      if String.ends_with?(url, "ListParticipants") do
+        {:ok, 200, JSON.encode!(%{"participants" => [%{"identity" => "intruder"}]})}
+      else
+        {:ok, 200, "{}"}
+      end
+    end)
+
+    start_supervised!({Reconciler, interval: 3_600_000})
+    reconciler = Process.whereis(Reconciler)
+
+    send(reconciler, :sweep)
+    _state = :sys.get_state(reconciler)
+
+    assert Process.alive?(reconciler)
+
+    assert_received {:twirp, "https://sfu.example/sfu/twirp/livekit.RoomService/ListParticipants"}
+
+    assert_received {:twirp,
+                     "https://sfu.example/sfu/twirp/livekit.RoomService/RemoveParticipant"}
+  end
 end
