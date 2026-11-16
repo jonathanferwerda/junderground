@@ -9,6 +9,7 @@ defmodule Junderground.Router do
   alias Junderground.{
     Admin,
     Admission,
+    Applications,
     Auth,
     Constructs,
     Directory,
@@ -58,7 +59,8 @@ defmodule Junderground.Router do
           "tickets",
           "rentals",
           "passes",
-          "lexicon"
+          "lexicon",
+          "applications"
         ] ++ if(sfu_available, do: ["sfu"], else: []),
       "peers" => peer_count(),
       "admission" => %{
@@ -895,6 +897,64 @@ defmodule Junderground.Router do
     end
   end
 
+  # ---- applications ------------------------------------------------------
+  # The public ingress for a person who has no house handle. The house collects
+  # over its signed rail; the applicant keeps a private token for the answer.
+
+  post "/v1/apply/:handle" do
+    case read_json(conn) do
+      {:ok, conn, _raw, body} ->
+        ip = conn.remote_ip |> :inet.ntoa() |> to_string()
+
+        case Applications.create(handle, body, ip) do
+          {:ok, app} -> json(conn, 202, Map.put(app, "ok", true))
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
+  get "/v1/apply/:id" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    token = conn.params["token"]
+
+    case Applications.status(id, token) do
+      {:ok, app} -> json(conn, 200, app)
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  get "/v1/houses/:handle/applications" do
+    conn = Plug.Conn.fetch_query_params(conn)
+    since = int_param(conn.params["since"], 0)
+
+    with {:ok, requester} <- Auth.verify(conn, ""),
+         :ok <- same_handle(requester, handle),
+         {:ok, apps} <- Applications.list(handle, since) do
+      json(conn, 200, %{"applications" => apps})
+    else
+      {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  post "/v1/houses/:handle/applications/:id/status" do
+    case read_json(conn) do
+      {:ok, conn, raw, body} ->
+        with {:ok, requester} <- Auth.verify(conn, raw),
+             :ok <- same_handle(requester, handle),
+             {:ok, app} <- Applications.decide(handle, id, body["status"]) do
+          json(conn, 200, %{"ok" => true, "application" => app})
+        else
+          {:error, reason} -> fail(conn, reason)
+        end
+
+      {:error, conn, reason} ->
+        fail(conn, reason)
+    end
+  end
+
   match _ do
     fail(conn, :not_found)
   end
@@ -1227,6 +1287,7 @@ defmodule Junderground.Router do
             ],
        do: 409
 
+  defp status_for(:rate_limited), do: 429
   defp status_for(:revoked), do: 409
   defp status_for(:not_websocket), do: 426
   defp status_for(_), do: 422

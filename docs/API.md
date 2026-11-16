@@ -664,6 +664,44 @@ re-checks every connected identity every 30 seconds against the grant, its
 admission epoch, revocation and the rental door, so a stop closes a WebSocket
 within 15 s and removes an SFU participant in about 30 s.
 
+## 4f. Applications (public ingress)
+
+An applicant has no house handle, so the house's box-office form is not the
+only door. A public request names the house; the switch stores it and the house
+collects it over its signed rail.
+
+```json
+POST /v1/apply/alpha
+{"name": "Dana", "email": "dana@example.test", "phone": "555-0100",
+ "roles": ["sales"], "interview": "Tuesday at ten",
+ "trial": "a link or a short page", "description": "…",
+ "crest": {…}, "consent": "on"}
+
+→ 202 {"ok": true, "id": "…", "token": "…", "status": "received"}
+```
+
+The token is the applicant's. It is returned once and never included in the
+house's copy.
+
+```
+GET  /v1/apply/:id?token=…                       → {"id","status","created","decided"}
+GET  /v1/houses/:handle/applications?since=…     (signed) → {"applications":[…]}
+POST /v1/houses/:handle/applications/:id/status  (signed)
+     {"status": "approved"} or {"status": "declined"} → {"ok": true, "application": {…}}
+```
+
+- The house must be admitted (`approved` or `probation`); an unknown or
+  unadmitted handle answers 404, so the door does not reveal which houses exist.
+- Only the owning house may list or decide; another handle is 403.
+- A decision is `received`, `approved` or `declined`; `decided` is the switch's
+  second, and `decided_by` names the house.
+- Rate: 20 requests an hour per IP and 200 an hour per house. The IP is stored
+  only as a 16-hex SHA-256 prefix.
+- The switch stores the application as sent (bounded fields, a 1 MB body) and
+  never decides. The house's own Box Office imports it and approves or declines
+  in the house, where the person and roles live.
+
+
 ## 5. Signed requests
 
 Every write, and every read of a non-public house, carries:
