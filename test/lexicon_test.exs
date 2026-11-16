@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/lexicon.ex lib/junderground/constructs.ex
 defmodule Junderground.LexiconTest do
   use ExUnit.Case, async: false
 
@@ -56,6 +57,7 @@ defmodule Junderground.LexiconTest do
     assert {:ok, 0} = Lexicon.learn("events", "something_else", ["le_spectacle"])
     assert Lexicon.canonical("events", "le spectacle") == "rock_show"
   end
+
   test "the administrator's language names the room, not its identity" do
     assert Lexicon.language() == "en"
     assert Lexicon.names(%{"events" => "christmas"}) == %{"events" => "Christmas"}

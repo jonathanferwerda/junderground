@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/constructs.ex lib/junderground/lexicon.ex
 defmodule Junderground.ConstructsTest do
   use ExUnit.Case, async: true
 

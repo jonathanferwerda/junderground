@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/sfu.ex lib/junderground/sfu/token.ex lib/junderground/sfu/health.ex lib/junderground/sfu/local.ex lib/junderground/sfu/client.ex lib/junderground/sfu/reconciler.ex
 defmodule Junderground.SfuTest do
   use ExUnit.Case, async: false
 

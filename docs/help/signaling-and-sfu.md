@@ -1,0 +1,24 @@
+---
+id: signaling-and-sfu
+title: Signaling and the SFU
+summary: How a granted house joins the room's WebSocket, and when the switch hands media to an SFU.
+sources: lib/junderground/signaling.ex, lib/junderground/signaling/socket.ex, lib/junderground/sfu.ex, lib/junderground/sfu/token.ex, lib/junderground/sfu/health.ex, lib/junderground/sfu/client.ex, lib/junderground/sfu/local.ex, lib/junderground/sfu/reconciler.ex, lib/junderground/turn.ex, lib/junderground/router.ex
+routes: POST /v1/rooms/:handle/:room/sfu/token; POST /v1/rooms/:handle/:room/sfu/revoke; GET /v1/rooms/:handle/:room/ws
+settings: sfu_url; sfu_key; sfu_secret; sfu_threshold; sfu_token_ttl; turn_urls; turn_secret
+stores: sfu.dets
+errors: room_full; revoked; not_websocket; expired; bad_grant; wrong_room; forbidden; not_found
+related: rooms-and-grants; tickets-and-rentals; admin-and-errors; getting-started
+verified: 2026-11-16
+---
+
+# Signaling and the SFU
+
+`GET /v1/rooms/:handle/:room/ws?grant=...` upgrades to the room's signaling WebSocket. The grant is verified before the upgrade — signature, expiry, revocation, admission epoch, room, subject and the `join` capability — exactly as the HTTP token route verifies it. A non-WebSocket request is `426 not_websocket`; a bad, expired, revoked or suspended grant is refused with the same status the HTTP route uses. The grant is in the URL because a browser cannot set an `Authorization` header on a WebSocket; treat it as a short-lived credential and do not log it.
+
+After the upgrade the switch sends a `hello` with this socket's `jti`, the room, subject, role, capabilities, peer count, `ice_servers` and the current `media` verdict. The client sends `offer`, `answer`, `ice`, `bye`, `video` and `broadcast` frames. The switch stamps every relayed frame with `from`, `from_jti` and `at`; a client-supplied sender is discarded. A `to` field addresses one grant id, an absent `to` goes to every other socket in the room, and a frame over 32 KiB is refused. The switch relays the handshake only; it never carries, stores or inspects media. The socket re-checks its grant every 15 seconds, so a suspension or revocation closes the channel without waiting for a client message. Presence remains the HTTP roster and is not the same thing as a socket: a joined house should still heartbeat `POST .../presence` so the room's roster sees it. The registry entry dies with the socket process, and `join` and `leave` frames announce changes alongside the roster.
+
+The switch also decides how many participants the room should carry. Below `sfu_threshold` live sockets it uses the mesh the reference client already builds. At or above the threshold, a room whose record `max` is at least the threshold becomes an SFU room; a room whose `max` is below it never does. The same endpoint returns the mesh path below the threshold, so a client may call it always. Over the room's `max` the token route answers `409 room_full`. If the room is at the mesh ceiling but no SFU is configured or healthy, it answers `503 sfu_unavailable` with `Retry-After: 30` rather than silently building a mesh that cannot carry the room.
+
+`POST /v1/rooms/:handle/:room/sfu/token` is house-signed. The grant must name this room, carry `join`, and have a subject equal to the authenticated requester; a house cannot upgrade another house's grant. The response is `200` with `mode: "sfu"`, the public `sfu_url`, an opaque room name, a short HS256 join token, its expiry, ICE servers and the peer count. The opaque room is derived from the room key and `sfu_secret`, so it is stable for the room and cannot be turned back into a handle. The join token's subject is the grant's `jti`, never a handle. The role and capabilities map onto the media grant: a citizen may publish audio and video and is room admin, a resident may publish audio and video, and a guest publishes audio unless the grant was clamped with `publish_video`; recording and data publishing stay off. The local opaque-room and grant map lives in `sfu.dets` and never leaves the process.
+
+`POST /v1/rooms/:handle/:room/sfu/revoke` is owner-only. It revokes the ordinary `jti` at the switch and best-effort removes that participant from the SFU. The reconciler re-verifies connected identities every thirty seconds against the grant, admission epoch, revocation and rental door, so a stop closes a WebSocket within about fifteen seconds and removes an SFU participant in about thirty. TURN credentials follow coturn's `use-auth-secret` scheme and are minted per request; `ice_servers` is empty when TURN is unconfigured, which is normal for a same-house tailnet call. Signaling and the control plane stay on the switch, but SRTP terminates at the SFU, so an SFU call is not end-to-end encrypted. Media is chat-room class; no phone number, PSTN termination or 911 routing exists here.

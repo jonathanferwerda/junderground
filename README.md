@@ -8,7 +8,7 @@ It is a separate service. It does not run jawnos. It carries no PSTN,
 emergency-calling or carrier obligations — the media it will broker is chat-room
 class (house-to-house and community calls), not a telephone system.
 
-> Status: **v0.1.15** — the directory, the record chain, administrator approval
+> Status: **v0.1.17** — the directory, the record chain, administrator approval
 > and probation, crest-bound identity, partial construct dials, peer onboarding
 > for other jundergrounds, presence and house-side relationship grading,
 > citizen/resident/guest room roles, resident passes, room tickets (bound and
@@ -91,6 +91,37 @@ curl -s localhost:4100/v1/meta | jq
 The switch generates its Ed25519 identity on first boot at
 `data/server.key` (0600) and advertises the public half from `/v1/meta`.
 
+### Help and agent tooling
+
+Tier 1 is hand-written operator/integrator help under `docs/help/`. Tier 2 is
+generated from the tree and never hand-maintained: `docs/AGENT-INDEX.md` is the
+compact index, and the three scripts read the source with
+`Code.string_to_quoted/2` so they work even when the project does not compile.
+They never boot the application or open DETS.
+
+```sh
+elixir scripts/where.exs Rooms.grant          # file:line for a module, function, route, setting, error, doc or test
+elixir scripts/where.exs --outline lib/junderground/router.ex
+elixir scripts/agent_help.exs rooms           # tier-2 brief: sources, routes, stores, settings, api, errors, tests, docs
+elixir scripts/help_audit.exs                 # tier-1 bindings and route coverage; --strict also fails warnings
+```
+
+### Landing and promotion
+
+`master` is the stable branch; `working` is the integration trunk. Work on a
+branch from `working`, commit, then queue it:
+
+```sh
+elixir scripts/land_enqueue.exs --trunk working --wait
+```
+
+The authority drains the queue with `elixir scripts/land_coordinator.exs --once`
+(rebases in a scratch worktree, runs the suite once, fast-forwards `working`)
+and promotes with `elixir scripts/land_promote.exs --once` (full suite, then a
+fast-forward of `master`). `land_status.exs` shows the queue, and
+`--refused --check` is the monitor's signal. `--no-push` keeps both scripts
+local. The full workflow is `docs/AGENTS-landing.md`.
+
 ### Configuration
 
 | Env | Default | Meaning |
@@ -99,6 +130,7 @@ The switch generates its Ed25519 identity on first boot at
 | `JG_DATA_DIR` | `data` | DETS files and the server key |
 | `JG_PUBLIC_URL` | `http://localhost:4100` | `iss` on grants |
 | `JG_GRANT_TTL` | `900` | Grant lifetime, seconds |
+| `JG_LANGUAGE` | `en` | Default language for the lexicon and room names |
 | `JG_ADMIN_KEYS` | empty | Comma-separated admin crest public keys |
 | `JG_AUTO_APPROVE` | off | `1` approves every registration (development only) |
 | `JG_TURN_URLS` | empty | Comma-separated coturn URLs |
@@ -108,6 +140,12 @@ The switch generates its Ed25519 identity on first boot at
 | `JG_SFU_SECRET` | none | LiveKit API secret; also names the opaque room |
 | `JG_SFU_THRESHOLD` | `5` | Live sockets at which a room becomes `sfu` |
 | `JG_SFU_TOKEN_TTL` | `300` | Join-token lifetime ceiling, seconds |
+| `JG_SFU_TRANSPORT` | none | SFU client transport override (development) |
+| `JG_WS_IDLE_TIMEOUT` | `120000` | WebSocket idle timeout, milliseconds |
+| `JG_RENT_BASE_FEE` | `0` | Base rental fee, in the quote currency |
+| `JG_RENT_CURRENCY` | `CAD` | Currency label in a rental quote |
+| `JG_RENT_BLOCK_SECONDS` | `14400` | Seconds in one rental block |
+| `JG_RENT_RATE_PERCENT` | `100,50,25` | Fee percentage by room specificity |
 
 ## What works / what does not
 
@@ -169,6 +207,19 @@ lib/junderground/
   router.ex      the /v1 HTTP surface
 docs/API.md      the API sketch and boundary
 docs/CHAT-ADMIN.md  the administrator's screen in the chat app
+docs/SFU.md      the media-plane design
+docs/help/       tier-1 operator/integrator help (one file per topic)
+docs/AGENT-INDEX.md  generated tier-2 index; do not edit by hand
+scripts/jg_index.exs  shared AST + Markdown index (no app boot)
+scripts/where.exs     the locator: module, function, route, setting, error, doc, test
+scripts/agent_help.exs  the tier-2 brief and index generator
+scripts/help_audit.exs  the tier-1 help audit
+scripts/land_lib.exs     shared queue, lock and scratch-worktree plumbing
+scripts/land_enqueue.exs queue a committed branch for working
+scripts/land_coordinator.exs  drain the queue (authority)
+scripts/land_status.exs  queue and verdicts
+scripts/land_promote.exs fast-forward master from working after the full suite
+docs/AGENTS-landing.md  the landing and promotion runbook
 ```
 
 ## Interop with jawnos

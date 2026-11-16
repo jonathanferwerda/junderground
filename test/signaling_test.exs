@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/signaling.ex lib/junderground/signaling/socket.ex
 defmodule Junderground.SignalingTest do
   use ExUnit.Case, async: false
 
@@ -93,13 +94,29 @@ defmodule Junderground.SignalingTest do
     {bad_video, a} = recv_text(a)
     assert JSON.decode!(bad_video)["type"] == "error"
 
-    send_text(a, JSON.encode!(%{"type" => "broadcast", "on" => "yes",
-      "streams" => [%{"id" => "s1", "label" => "Studio 1", "kind" => "audio"}]}))
+    send_text(
+      a,
+      JSON.encode!(%{
+        "type" => "broadcast",
+        "on" => "yes",
+        "streams" => [%{"id" => "s1", "label" => "Studio 1", "kind" => "audio"}]
+      })
+    )
+
     {cast, b} = recv_text(b)
     assert %{"type" => "broadcast", "on" => "yes"} = JSON.decode!(cast)
-    assert [%{"id" => "s1", "label" => "Studio 1", "kind" => "audio"}] = JSON.decode!(cast)["streams"]
 
-    send_text(a, JSON.encode!(%{"type" => "broadcast", "streams" => [%{"id" => "s1", "label" => "x", "kind" => "smell"}]}))
+    assert [%{"id" => "s1", "label" => "Studio 1", "kind" => "audio"}] =
+             JSON.decode!(cast)["streams"]
+
+    send_text(
+      a,
+      JSON.encode!(%{
+        "type" => "broadcast",
+        "streams" => [%{"id" => "s1", "label" => "x", "kind" => "smell"}]
+      })
+    )
+
     {bad_cast, a} = recv_text(a)
     assert JSON.decode!(bad_cast)["type"] == "error"
 

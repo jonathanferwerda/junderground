@@ -744,7 +744,7 @@ All responses are JSON. Errors are `{"error":{"code":"…"}}`.
 ```json
 {
   "name": "junderground",
-  "version": "0.1.0",
+  "version": "0.1.17",
   "pubkey": "<switch's Ed25519 public key, base64>",
   "public_url": "https://thejunderground.example",
   "issued": 1760000000,

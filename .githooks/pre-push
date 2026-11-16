@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+if [ "${JG_SUITE_ALREADY_RUN:-}" != "1" ]; then
+  mix test
+fi
+if [ -f scripts/help_audit.exs ]; then elixir scripts/help_audit.exs; fi
+if [ -f scripts/agent_help.exs ]; then elixir scripts/agent_help.exs --check; fi

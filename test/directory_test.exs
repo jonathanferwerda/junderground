@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/directory.ex lib/junderground/record.ex
 defmodule Junderground.DirectoryTest do
   use ExUnit.Case, async: false
 

@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/rooms.ex lib/junderground/rentals.ex lib/junderground/presence.ex lib/junderground/token.ex lib/junderground/turn.ex lib/junderground/router.ex
 defmodule Junderground.RoomsTest do
   use ExUnit.Case, async: false
 

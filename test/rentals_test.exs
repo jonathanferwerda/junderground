@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/rentals.ex lib/junderground/constructs.ex
 defmodule Junderground.RentalsTest do
   use ExUnit.Case, async: false
 

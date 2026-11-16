@@ -15,6 +15,26 @@ PORT=4100 mix run --no-halt
 Elixir 1.18+ / OTP 27+. The HTTP server is Bandit (chosen over Cowboy because
 cowlib's current release carries an open advisory).
 
+## Look it up — do not grep for it
+
+These scripts read the tree with `Code.string_to_quoted/2`. They never boot the
+application or open DETS, so they work even when the tree does not compile.
+
+- `elixir scripts/where.exs <name>` — `file:line` for a module, function/arity,
+  route, setting, DETS store, error atom, document heading or test file. A file
+  path reports the module, help topics, routes and tests around it; a miss prints
+  near names and mention lines.
+- `elixir scripts/where.exs --outline FILE` — every declaration in a file as
+  `line<TAB>kind name`, so read a range instead of the whole file.
+- `elixir scripts/agent_help.exs <name>` — the tier-2 brief: sources, routes,
+  stores, settings, public API, errors, claiming tests, docs and source notes.
+  `--routes` gives exact rows; `--config` and `--stores` list the whole tree.
+- `elixir scripts/help_audit.exs` — checks `docs/help/*.md` bindings against the
+  tree and every router route for coverage. `--strict` also fails warnings.
+
+`docs/AGENT-INDEX.md` is generated: `agent_help.exs --write-index` rewrites it,
+`--check` fails when it is stale. Never edit it by hand.
+
 ## Invariants
 
 - **The signed bytes are a cross-language contract.** `Junderground.Canonical`
@@ -87,6 +107,35 @@ cowlib's current release carries an open advisory).
   `hello.jti` is the socket's own address, and `join`/`leave` carry it as
   `from_jti`; a peer addresses a frame with `to`. Keep that id out of the
   roster (it is a grant, not a person).
+## Landing and promotion
+
+`master` is stable; `working` is the integration trunk. Agents branch from
+`working`, commit, and queue the branch:
+
+```sh
+elixir scripts/land_enqueue.exs --trunk working --wait --timeout 300
+```
+
+The authority drains with `elixir scripts/land_coordinator.exs --once`; it
+rebases in a scratch worktree under `.land/`, runs the suite once, fast-forwards
+`working`, and pushes unless `--no-push`. `elixir scripts/land_status.exs`
+shows the queue; `--refused --check` is the monitor's signal. `master` moves
+only by `elixir scripts/land_promote.exs --once`, a full-suite fast-forward.
+The queue lives in `<git-common-dir>/land-queue/`; the full workflow is
+`docs/AGENTS-landing.md`.
+
+## Help and tests
+
+- Tier 1 is hand-written: `docs/help/*.md`, one topic per concern. When a route,
+  setting, store or error changes, update the topic in the same change and bump
+  its `verified` date. `help_audit.exs` checks the bindings.
+- Tier 2 is generated: `agent_help.exs` and `docs/AGENT-INDEX.md`. Derive facts;
+  do not hand-write a route, table or function list that the tree can answer.
+- Every test file starts with `# tests-for:` naming the source files it claims;
+  `index_test.exs` and the audit read it.
+- `.githooks/pre-push` runs `mix test`, the help audit and the index check.
+  Enable it once with `git config core.hooksPath .githooks`.
+
 ## Boundary
 
 No PSTN, no DIDs, no 911, no carrier obligations. Media is chat-room class.

@@ -9,3 +9,5 @@ junderground-*.tar
 /tmp/
 /data/
 /.elixir_ls/
+
+/.land/

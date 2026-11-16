@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/router.ex lib/junderground/admin.ex lib/junderground/admission.ex
 defmodule Junderground.AdminHttpTest do
   use ExUnit.Case, async: false
 
@@ -247,6 +248,7 @@ defmodule Junderground.AdminHttpTest do
     assert %{"reviews" => [%{"handle" => "alpha", "verdict" => "suspend"}]} =
              JSON.decode!(reviews.resp_body)
   end
+
   test "the administrator's language names the dial, not its identity", ctx do
     body = JSON.encode!(%{"language" => "de"})
 

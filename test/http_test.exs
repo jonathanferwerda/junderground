@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/router.ex lib/junderground/admission.ex lib/junderground/auth.ex lib/junderground/directory.ex lib/junderground/keys.ex lib/junderground/nonces.ex lib/junderground/record.ex lib/junderground/rooms.ex lib/junderground/server_key.ex lib/junderground/constructs.ex lib/junderground/rentals.ex
 defmodule Junderground.HttpTest do
   use ExUnit.Case, async: false
 

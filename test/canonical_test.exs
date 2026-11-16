@@ -1,3 +1,4 @@
+# tests-for: lib/junderground/canonical.ex lib/junderground/keys.ex
 defmodule Junderground.CanonicalTest do
   use ExUnit.Case, async: true
 
